@@ -110,6 +110,20 @@ _CONTEXT_OVERFLOW_SHRINK_BASE: float = 0.8
 # invisible to the retry-attempt counters, so only add write-only breadcrumbs.
 _STREAK_TRANSPARENT_LIFECYCLE_EVENTS: frozenset[str] = frozenset({"adaptive_context_truncation"})
 
+# A user turn may legitimately need several read/validate/propose steps, but an
+# agent that keeps retrying a rejected tool call must not turn one chat message
+# into an unbounded job chain. At the ceiling the next inference is forced to
+# be conversational (tools removed) and receives a recovery instruction.
+_MAX_TOOL_ROUNDS_PER_USER_TURN = 8
+_TOOL_ROUND_BUDGET_NOTICE = (
+    "Runtime safeguard: this user turn has reached its tool-round limit. "
+    "Do not call or mention tools. Reply to the user normally: briefly say "
+    "that you could not finish validating the requested action, preserve any "
+    "useful coaching guidance already established, and ask the single most "
+    "helpful question for a fresh attempt. Never claim that a change was "
+    "created, saved, or applied."
+)
+
 # ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
 # wall-clock cap on a single ``run_session_step`` call. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
@@ -241,6 +255,40 @@ def _retry_delay_for_attempt(attempt: int) -> float | None:
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
         return None
     return _RETRY_BACKOFF_SECONDS[attempt]
+
+
+def _tool_rounds_since_last_user(messages: list[dict[str, Any]]) -> int:
+    """Count assistant tool-call rounds in the current direct user turn.
+
+    A new user message is an explicit fresh attempt and resets the budget.
+    Multiple parallel calls in one assistant message count as one round: the
+    loop risk is repeated model→tool→model cycling, not useful fan-out width.
+    """
+    last_user = -1
+    for index, message in enumerate(messages):
+        if message.get("role") == "user":
+            last_user = index
+    return sum(
+        1
+        for message in messages[last_user + 1 :]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+
+
+def _force_conversational_recovery(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add the tool-budget notice to the existing system message."""
+    recovered = [dict(message) for message in messages]
+    for message in recovered:
+        if message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = f"{content}\n\n{_TOOL_ROUND_BUDGET_NOTICE}"
+            return recovered
+    recovered.insert(0, {"role": "system", "content": _TOOL_ROUND_BUDGET_NOTICE})
+    return recovered
 
 
 def _limit_to_microusd(limit_usd: float | None) -> int | None:
@@ -1140,6 +1188,16 @@ async def _run_session_step_body(
 
     messages = step_ctx.messages
     tools = step_ctx.tools
+    tool_rounds = _tool_rounds_since_last_user(messages)
+    if tool_rounds >= _MAX_TOOL_ROUNDS_PER_USER_TURN:
+        messages = _force_conversational_recovery(messages)
+        tools = []
+        log.warning(
+            "step.tool_round_budget_exhausted",
+            session_id=session_id,
+            tool_rounds=tool_rounds,
+            limit=_MAX_TOOL_ROUNDS_PER_USER_TURN,
+        )
 
     # Provision skill files to workspace (idempotent, host-side writes).
     if step_ctx.skill_versions:
