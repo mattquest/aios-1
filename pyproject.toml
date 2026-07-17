@@ -39,12 +39,12 @@ dependencies = [
     "cryptography>=46",         # egress-CA x509 cert + EC key (sandbox/egress_ca.py)
     "python-ulid>=3.0",
     # LLM client
-    # >=1.83.7 clears CVE-2026-42208 (LiteLLM Proxy pre-auth SQLi). aios uses
-    # litellm as a client library (harness/completion.py), not the Proxy, so the
-    # vulnerable path is unreachable — floor raised for SCA hygiene.
-    "litellm>=1.83.7",
-    # MCP client + server reflection.
-    # Cap <2: SDK v2 is a breaking rearchitecture (maintainers advise pinning <2).
+    # <1.92: 1.92.0 dropped the pure-python wheel (manylinux-only native
+    # build; no macOS wheel, sdist needs a Rust toolchain). 1.91.3 clears
+    # the proxy-code criticals flagged by grype (fixed <1.84 / <1.83.10).
+    "litellm>=1.91.3,<1.92",
+    # MCP client + server reflection. Cap <2 because SDK v2 is a breaking
+    # rearchitecture and maintainers advise pinning v1 consumers below it.
     "mcp>=1.20,<2",
     "fastapi-mcp>=0.4",
     # Web tools

@@ -59,6 +59,13 @@ litellm.modify_params = True
 # creates a bootstrap deadlock: thinking can never turn on for an existing
 # session because no prior turn has thinking blocks, and no turn can produce
 # them while the param keeps being dropped. Neutralize it.
+#
+# litellm 1.91.x narrowed the guard (drop now also requires that NO assistant
+# message has thinking blocks, and is gated on ``litellm.modify_params``) —
+# that fixes the ongoing case but NOT the bootstrap case: we set
+# ``modify_params = True`` above, so a session whose history has no thinking
+# blocks yet would still get the param dropped. Keep this patch until the
+# drop path is removed upstream or scoped away from the bootstrap case.
 try:  # defensive: private module path, may move across litellm versions
     from litellm.llms.anthropic.chat import transformation as _anthropic_transformation
 
