@@ -1282,9 +1282,17 @@ async def get_session_event_stats(
 
 
 async def get_session_model(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> str:
-    """Bound model for ``session_id`` (pinned agent version wins)."""
+    """Bound model for ``session_id`` (pinned agent version wins).
+
+    ``tier:`` scheme strings resolve here (docs/rlm.md) so every consumer of
+    this wrapper — capability gating, display — sees a raw provider model,
+    mirroring the surface-chokepoint resolution in ``services.agents``.
+    """
+    from aios.harness.model_tier import resolve_tier_model
+
     async with pool.acquire() as conn:
-        return await queries.get_session_model(conn, session_id, account_id=account_id)
+        model = await queries.get_session_model(conn, session_id, account_id=account_id)
+    return resolve_tier_model(model, get_settings().model_tiers)
 
 
 async def list_sessions(

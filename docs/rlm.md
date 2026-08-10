@@ -30,8 +30,9 @@ no parallel spawn path, no second storage convention:
 A variable is a named handle whose content lives in a new `context_variables`
 table. Content is a `text` column with the `memories` discipline —
 `content_sha256`, `content_size_bytes`, `CHECK (content_size_bytes =
-octet_length(content))`, and a byte cap (default 2 MiB,
-`AIOS_CONTEXT_VARIABLE_MAX_BYTES`). Rationale:
+octet_length(content))`, and a byte cap (8 MiB,
+`models.context_variables.MAX_CONTENT_BYTES` — sized so spilled tool
+results always fit). Rationale:
 
 - **TOAST already gives out-of-row storage transparently.** Postgres large
   objects (`lo_*`) are used nowhere in this codebase and add a second I/O API,
@@ -135,8 +136,9 @@ Two pieces, both existing patterns:
    overflow line. Per-step-mutating state never enters the system prompt.
 
 The listing read happens in `compute_step_prelude` (async, DB access is
-sanctioned there) and is stubbed in `tests/unit/conftest.py` like the other
-pre-inference leaves.
+sanctioned there), gated on the surface actually holding a ctx/rlm tool —
+agents without them (including every existing loop unit-test fixture) pay
+nothing and hit no new DB leaf.
 
 ## B. Recursive sub-queries
 
@@ -262,6 +264,23 @@ procedures, and cron triggers (`wake_owner` for model-in-the-loop sync and
 daily review; `workflow` actions for deterministic no-model syncs).
 Operator surface: `/v1/context-variables` CRUD + `aios vars` for seeding
 and inspection.
+
+## Known tradeoffs (v1, deliberate)
+
+- **Crash-resume of a parked `rlm_query`/`rlm_verify` returns the bare
+  `{ok | error}`** (the shared re-park path cannot re-run the harvest), so
+  that one result lacks the tokens/provenance enrichment and its child's
+  tokens never accrue to the ledger. Bounded to one call per worker crash;
+  the durable record (request edge, child log, spans) is intact and `aios
+  trace` reconstructs it. `rlm_map` is deliberately NOT resumable — its N
+  edges share one `tool_call_id`, which the LIMIT-1 re-park lookup cannot
+  rediscover — so a crash error-repairs it and the model retries.
+- **A surface without ctx tools cannot read past a spill stub's preview.**
+  The old file spill was recoverable via `read`; the inverted spill is
+  recoverable via `ctx_peek`/`ctx_grep` (or the operator's `aios vars`).
+  Agents expected to receive oversized results should hold the ctx read
+  tools — they ship in the recommended default toolset, and this runtime's
+  product surface (the CoS) always carries them.
 
 ## Explicit non-goals (v1)
 

@@ -64,10 +64,13 @@ async def test_over_cap_returns_handle_stub_with_preview() -> None:
     assert name in result.content
     assert "3,000 characters" in result.content
     assert "ctx_peek" in result.content
-    # Deterministic preview: the head of the content, frozen into the stub.
-    assert result.content.endswith("b" * PREVIEW_CHARS)
+    # Deterministic preview: the head of the content, frozen into the stub and
+    # shrunk so the stub itself respects max_chars (1000 - ~400 prose here).
+    assert result.content.endswith("b" * min(PREVIEW_CHARS, 1_000 - 400))
+    assert len(result.content) <= 1_000
 
     spill.assert_awaited_once()
+    assert spill.await_args is not None
     kwargs = spill.await_args.kwargs
     assert kwargs["session_id"] == _SESSION_ID
     assert kwargs["name"] == name
@@ -83,8 +86,12 @@ async def test_variable_name_is_pure_and_sanitized() -> None:
     charset and bounded to the 128-char name cap."""
     assert spill_variable_name("call_abc") == "tool_result_call_abc"
     assert spill_variable_name("we/ird id!") == "tool_result_we_ird_id_"
-    assert spill_variable_name("x" * 300) == ("tool_result_" + "x" * 300)[:128]
-    assert len(spill_variable_name("x" * 300)) == 128
+    # Truncation folds in a digest of the FULL id so two long ids sharing a
+    # prefix can never alias one variable.
+    long_a, long_b = "x" * 300, "x" * 299 + "y"
+    assert len(spill_variable_name(long_a)) == 128
+    assert spill_variable_name(long_a) != spill_variable_name(long_b)
+    assert spill_variable_name(long_a).startswith("tool_result_" + "x" * 100)
 
 
 async def test_pathological_content_bounded_at_variable_cap() -> None:
@@ -96,7 +103,8 @@ async def test_pathological_content_bounded_at_variable_cap() -> None:
         await cap_tool_result_content(
             executor, _SESSION_ID, _TOOL_CALL_ID, content, max_chars=1_000
         )
-    kwargs: dict[str, Any] = spill.await_args.kwargs
+    assert spill.await_args is not None
+    kwargs: Any = spill.await_args.kwargs
     assert kwargs["content_size_bytes"] <= MAX_CONTENT_BYTES
     assert kwargs["content"].endswith("[…content truncated at the context-variable byte cap]")
     assert len(kwargs["content"].encode("utf-8")) == kwargs["content_size_bytes"]

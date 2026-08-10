@@ -39,11 +39,17 @@ async def get_rlm_spawn_budget(
     back to the operator defaults. The discriminant is the edge's
     ``rlm_token_budget`` field, written only by the rlm spawn path.
     """
+    # The rlm spawn edge is written in the child-creation transaction right
+    # after the first user message, so it is always among the session's first
+    # few events. The ``seq <= 8`` bound turns this into an O(1) probe on the
+    # (session_id, seq) index — a ROOT session (no edge, the common case on
+    # the immortal-CoS workload) would otherwise scan its whole history on
+    # every admission.
     row = await conn.fetchrow(
         "SELECT (data->>'depth')::int AS depth, "
         "       (data->>'rlm_token_budget')::bigint AS token_budget "
         "FROM events "
-        "WHERE session_id = $1 AND account_id = $2 AND kind = 'lifecycle' "
+        "WHERE session_id = $1 AND account_id = $2 AND seq <= 8 AND kind = 'lifecycle' "
         "  AND data->>'event' = 'request_opened' AND data ? 'rlm_token_budget' "
         "ORDER BY seq ASC LIMIT 1",
         session_id,
@@ -89,9 +95,13 @@ async def admit_rlm_child(
     """Atomically count one child spawn against the ledger.
 
     Returns ``(children_spawned_this_step, child_tokens_this_turn)`` AFTER the
-    increment. Counters reset when their key advances; a refused admission
-    leaves its increment in place, so repeated over-budget attempts stay
-    refused (the counter counts attempts, which is the conservative side).
+    increment. Counters reset only when their key ADVANCES (keys are
+    monotonic via GREATEST): an admission arriving with an older key — a
+    prior step's still-running tool task interleaving with the next step's
+    spawns — counts against the CURRENT window instead of resetting it, so
+    interleaving can never evade a cap. A refused admission leaves its
+    increment in place, so repeated over-budget attempts stay refused (the
+    counter counts attempts, which is the conservative side).
     """
     row = await conn.fetchrow(
         """
@@ -99,13 +109,13 @@ async def admit_rlm_child(
         VALUES ($1, $2, 1, $3, 0)
         ON CONFLICT (session_id) DO UPDATE SET
             children_spawned = CASE
-                WHEN rlm_ledgers.step_key = EXCLUDED.step_key
+                WHEN rlm_ledgers.step_key >= EXCLUDED.step_key
                 THEN rlm_ledgers.children_spawned + 1 ELSE 1 END,
-            step_key = EXCLUDED.step_key,
+            step_key = GREATEST(rlm_ledgers.step_key, EXCLUDED.step_key),
             child_tokens = CASE
-                WHEN rlm_ledgers.turn_key = EXCLUDED.turn_key
+                WHEN rlm_ledgers.turn_key >= EXCLUDED.turn_key
                 THEN rlm_ledgers.child_tokens ELSE 0 END,
-            turn_key = EXCLUDED.turn_key,
+            turn_key = GREATEST(rlm_ledgers.turn_key, EXCLUDED.turn_key),
             updated_at = now()
         RETURNING children_spawned, child_tokens
         """,

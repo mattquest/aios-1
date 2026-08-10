@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from typing import Any, Literal
 
 import asyncpg
@@ -37,9 +38,14 @@ from aios.harness import runtime
 from aios.harness.model_tier import tier_model_string
 from aios.ids import SESSION, make_id
 from aios.jobs.app import defer_wake
+from aios.logging import get_logger
 from aios.models.agents import ToolSpec
 from aios.models.attenuation import Surface, surface_of
-from aios.models.context_variables import ContextVariable, VariableName
+from aios.models.context_variables import (
+    MAX_CONTENT_BYTES,
+    ContextVariable,
+    VariableName,
+)
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services import context_variables as ctx_service
@@ -55,7 +61,9 @@ from aios.tools.registry import ToolResult, registry
 _QUERY_CHILD_TOOLS = ("ctx_list", "ctx_peek", "ctx_grep", "rlm_query", "rlm_verify")
 _VERIFY_CHILD_TOOLS = ("ctx_peek", "ctx_grep")
 
-_MAP_CHUNK_VARIABLE = "chunk"
+_NAME_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+log = get_logger(__name__)
 
 VERIFY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -153,7 +161,7 @@ class _Budgets:
 
 
 async def _admit(
-    conn: asyncpg.Connection[Any],
+    pool: asyncpg.Pool[Any],
     *,
     session_id: str,
     account_id: str,
@@ -164,46 +172,51 @@ async def _admit(
 
     Raises a structured :class:`ToolBail` on exhaustion (depth, per-step
     children, per-turn child tokens). Returns the resolved budgets and the
-    turn key the harvest must accrue against.
+    turn key the harvest must accrue against. Owns its own connection, and
+    while holding it awaits only ``queries.*`` calls (the pooled-connection
+    rule — the lint cannot see through local helper awaits).
     """
     settings = get_settings()
-    spawn = await queries.get_rlm_spawn_budget(conn, session_id, account_id=account_id)
-    depth_remaining = spawn.depth if spawn is not None else settings.rlm_max_depth
-    token_budget = spawn.token_budget if spawn is not None else settings.rlm_max_total_child_tokens
-    if depth_remaining <= 0:
-        raise ToolBail(
-            "rlm recursion depth exhausted",
-            detail={"kind": "rlm_depth_exhausted", "depth": depth_remaining},
+    async with pool.acquire() as conn:
+        spawn = await queries.get_rlm_spawn_budget(conn, session_id, account_id=account_id)
+        depth_remaining = spawn.depth if spawn is not None else settings.rlm_max_depth
+        token_budget = (
+            spawn.token_budget if spawn is not None else settings.rlm_max_total_child_tokens
         )
-    step_key = await queries.get_tool_call_parent_seq(
-        conn, session_id, tool_call_id, account_id=account_id
-    )
-    turn_key = await queries.get_session_last_user_seq(conn, session_id, account_id=account_id)
-    budgets: _Budgets | None = None
-    for _ in range(children):
-        spawned, tokens_spent = await queries.admit_rlm_child(
-            conn, session_id=session_id, step_key=step_key or 0, turn_key=turn_key
+        if depth_remaining <= 0:
+            raise ToolBail(
+                "rlm recursion depth exhausted",
+                detail={"kind": "rlm_depth_exhausted", "depth": depth_remaining},
+            )
+        step_key = await queries.get_tool_call_parent_seq(
+            conn, session_id, tool_call_id, account_id=account_id
         )
-        if spawned > settings.rlm_max_children_per_step:
-            raise ToolBail(
-                "rlm children budget exhausted for this step",
-                detail={
-                    "kind": "rlm_children_exhausted",
-                    "max_children_per_step": settings.rlm_max_children_per_step,
-                },
+        turn_key = await queries.get_session_last_user_seq(conn, session_id, account_id=account_id)
+        budgets: _Budgets | None = None
+        for _ in range(children):
+            spawned, tokens_spent = await queries.admit_rlm_child(
+                conn, session_id=session_id, step_key=step_key or 0, turn_key=turn_key
             )
-        if tokens_spent >= token_budget:
-            raise ToolBail(
-                "rlm child-token budget exhausted for this turn",
-                detail={
-                    "kind": "rlm_tokens_exhausted",
-                    "token_budget": token_budget,
-                    "tokens_spent": tokens_spent,
-                },
-            )
-        budgets = _Budgets(depth_remaining, token_budget, tokens_spent)
-    assert budgets is not None
-    return budgets, turn_key
+            if spawned > settings.rlm_max_children_per_step:
+                raise ToolBail(
+                    "rlm children budget exhausted for this step",
+                    detail={
+                        "kind": "rlm_children_exhausted",
+                        "max_children_per_step": settings.rlm_max_children_per_step,
+                    },
+                )
+            if tokens_spent >= token_budget:
+                raise ToolBail(
+                    "rlm child-token budget exhausted for this turn",
+                    detail={
+                        "kind": "rlm_tokens_exhausted",
+                        "token_budget": token_budget,
+                        "tokens_spent": tokens_spent,
+                    },
+                )
+            budgets = _Budgets(depth_remaining, token_budget, tokens_spent)
+        assert budgets is not None
+        return budgets, turn_key
 
 
 async def _spawn_and_await(
@@ -359,10 +372,9 @@ async def rlm_query_handler(session_id: str, arguments: dict[str, Any]) -> ToolR
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     launcher = await agents_service.load_for_session(pool, session, account_id=account_id)
 
-    async with pool.acquire() as conn:
-        budgets, turn_key = await _admit(
-            conn, session_id=session_id, account_id=account_id, tool_call_id=tool_call_id
-        )
+    budgets, turn_key = await _admit(
+        pool, session_id=session_id, account_id=account_id, tool_call_id=tool_call_id
+    )
 
     granted = await _resolve_granted(
         pool,
@@ -434,11 +446,22 @@ def _chunk(content: str, chunker: _Chunker) -> list[str]:
             "\n".join(lines[i : i + chunker.size]) for i in range(0, len(lines), chunker.size)
         ] or [""]
     if chunker.kind == "bytes":
+        # Byte windows snapped BACK to utf-8 character boundaries so no byte is
+        # ever dropped: the next chunk starts exactly where this one ended.
         encoded = content.encode("utf-8")
-        return [
-            encoded[i : i + chunker.size].decode("utf-8", errors="ignore")
-            for i in range(0, len(encoded), chunker.size)
-        ] or [""]
+        chunks: list[str] = []
+        start = 0
+        while start < len(encoded):
+            end = min(start + chunker.size, len(encoded))
+            while end < len(encoded) and end > start and (encoded[end] & 0xC0) == 0x80:
+                end -= 1
+            if end <= start:  # size smaller than one character: take the whole char
+                end = min(start + chunker.size, len(encoded))
+                while end < len(encoded) and (encoded[end] & 0xC0) == 0x80:
+                    end += 1
+            chunks.append(encoded[start:end].decode("utf-8"))
+            start = end
+        return chunks or [""]
     try:
         items = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -480,75 +503,110 @@ async def rlm_map_handler(session_id: str, arguments: dict[str, Any]) -> ToolRes
                 "max_children_per_step": max_children,
             },
         )
-
-    async with pool.acquire() as conn:
-        budgets, turn_key = await _admit(
-            conn,
-            session_id=session_id,
-            account_id=account_id,
-            tool_call_id=tool_call_id,
-            children=len(chunks),
+    # The json_items chunker re-serializes (ensure_ascii escapes multi-byte
+    # runs), so a chunk can outgrow the variable byte cap even though the
+    # source fit. Refuse the whole call up front — a structured, non-evicting
+    # refusal the model answers by shrinking the chunker size.
+    oversized = [i for i, c in enumerate(chunks) if len(c.encode("utf-8")) > MAX_CONTENT_BYTES]
+    if oversized:
+        raise ToolBail(
+            "chunk exceeds the context-variable byte cap; use a smaller chunker size",
+            detail={"chunks": oversized, "max_bytes": MAX_CONTENT_BYTES},
         )
+
+    budgets, turn_key = await _admit(
+        pool,
+        session_id=session_id,
+        account_id=account_id,
+        tool_call_id=tool_call_id,
+        children=len(chunks),
+    )
     per_child_budget = max(budgets.tokens_remaining // len(chunks), 1)
     surface = _child_surface(_QUERY_CHILD_TOOLS, launcher)
 
-    async def _one(index: int, chunk: str) -> ToolResult:
-        child_id = rlm_child_session_id(session_id, tool_call_id, ordinal=index)
-        input_text = "\n\n".join(
-            (
-                args.prompt,
-                f"Your input is chunk {index + 1}/{len(chunks)} of variable "
-                f"{args.var!r}, staged in your context variable "
-                f"{_MAP_CHUNK_VARIABLE!r} — read it with ctx_peek/ctx_grep.",
-            )
-        )
-        stim = sessions_service.AskNewSession(
-            session_id=child_id,
-            agent_id=None,
-            environment_id=session.environment_id,
-            agent_version=None,
-            model=model,
-            parent_run_id=None,
-            surface=surface,
-            vault_ids=[],
-            request_id=tool_call_id if index == 0 else f"{tool_call_id}#{index}",
-            input=input_text,
-            output_schema=args.output_schema,
-            depth=budgets.depth_remaining - 1,
-            caller={"kind": "session", "id": session_id, "tool_call_id": tool_call_id},
-            rlm_token_budget=per_child_budget,
-        )
-        spawned = await sessions_service.stimulate(pool, stim, account_id=account_id)
-        if spawned:
-            # The chunk is the child's private input: a session-scoped variable
-            # on the child, written before its first wake.
+    # Stage every chunk as a PARENT-scoped variable BEFORE any spawn, granted
+    # to its child inside the spawn transaction — the child can never wake
+    # (not even via the periodic sweep) before its input is durable, and a
+    # crash between spawns leaves no chunkless child.
+    safe_tcid = _NAME_SAFE.sub("_", tool_call_id)
+    chunk_vars: list[ContextVariable] = []
+    for index, chunk in enumerate(chunks):
+        chunk_vars.append(
             await ctx_service.write_variable(
                 pool,
                 account_id=account_id,
                 scope="session",
-                session_id=child_id,
+                session_id=session_id,
                 agent_id=None,
-                name=_MAP_CHUNK_VARIABLE,
+                name=f"rlm_chunk_{index}_{safe_tcid}"[:128],
                 content=chunk,
                 kind="data",
                 description=f"chunk {index + 1}/{len(chunks)} of {args.var!r}",
-                metadata={"writer_session_id": session_id},
+                metadata={"writer_session_id": session_id, "rlm_map_tool_call": tool_call_id},
             )
-            await defer_wake(pool, child_id, account_id=account_id, cause="rlm_child_spawn")
-        resolved = await _park_and_resolve(
-            pool,
-            servicer_kind="session",
-            servicer_id=child_id,
-            request_id=stim.request_id,
-            account_id=account_id,
-            output_schema=args.output_schema,
         )
-        async with pool.acquire() as conn:
-            usage = await queries.get_session_usage(conn, child_id, account_id=account_id)
-            if usage.total_tokens:
-                await queries.add_rlm_child_tokens(
-                    conn, session_id=session_id, turn_key=turn_key, tokens=usage.total_tokens
+
+    async def _one(index: int, chunk_var: ContextVariable) -> ToolResult:
+        child_id = rlm_child_session_id(session_id, tool_call_id, ordinal=index)
+        try:
+            input_text = "\n\n".join(
+                (
+                    args.prompt,
+                    f"Your input is chunk {index + 1}/{len(chunks)} of variable "
+                    f"{args.var!r}, granted to you as the context variable "
+                    f"{chunk_var.name!r} — read it with ctx_peek/ctx_grep.",
                 )
+            )
+            stim = sessions_service.AskNewSession(
+                session_id=child_id,
+                agent_id=None,
+                environment_id=session.environment_id,
+                agent_version=None,
+                model=model,
+                parent_run_id=None,
+                surface=surface,
+                vault_ids=[],
+                request_id=tool_call_id if index == 0 else f"{tool_call_id}#{index}",
+                input=input_text,
+                output_schema=args.output_schema,
+                depth=budgets.depth_remaining - 1,
+                caller={"kind": "session", "id": session_id, "tool_call_id": tool_call_id},
+                context_variable_ids=[chunk_var.id],
+                rlm_token_budget=per_child_budget,
+            )
+            spawned = await sessions_service.stimulate(pool, stim, account_id=account_id)
+            if spawned:
+                await defer_wake(pool, child_id, account_id=account_id, cause="rlm_child_spawn")
+            resolved = await _park_and_resolve(
+                pool,
+                servicer_kind="session",
+                servicer_id=child_id,
+                request_id=stim.request_id,
+                account_id=account_id,
+                output_schema=args.output_schema,
+            )
+            async with pool.acquire() as conn:
+                usage = await queries.get_session_usage(conn, child_id, account_id=account_id)
+                if usage.total_tokens:
+                    await queries.add_rlm_child_tokens(
+                        conn, session_id=session_id, turn_key=turn_key, tokens=usage.total_tokens
+                    )
+        except ToolBail as exc:
+            # Contain per-chunk failures: gather must never see an exception —
+            # a raise would discard every sibling's result and (worse) take the
+            # generic-exception path that evicts the parent's sandbox.
+            return ToolResult(
+                content={"error": exc.message, **exc.detail, "child_session_id": child_id},
+                is_error=True,
+            )
+        except Exception as exc:
+            return ToolResult(
+                content={
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "child_session_id": child_id,
+                },
+                is_error=True,
+            )
         if isinstance(resolved, ToolResult):
             content = resolved.content
             body = content if isinstance(content, dict) else {"error": content}
@@ -561,7 +619,15 @@ async def rlm_map_handler(session_id: str, arguments: dict[str, Any]) -> ToolRes
             }
         )
 
-    results = await asyncio.gather(*(_one(i, c) for i, c in enumerate(chunks)))
+    results = await asyncio.gather(*(_one(i, v) for i, v in enumerate(chunk_vars)))
+    # The staged chunks are per-call scratch on the parent; archive them so the
+    # roster doesn't accumulate one entry per historical map call. Best-effort:
+    # a failure here must not discard the harvested results.
+    for chunk_var in chunk_vars:
+        try:
+            await ctx_service.archive_variable(pool, chunk_var.id, account_id=account_id)
+        except Exception:
+            log.warning("rlm_map.chunk_archive_failed", variable_id=chunk_var.id)
     total_tokens = sum(r.content.get("tokens", 0) for r in results if isinstance(r.content, dict))
     return ToolResult(
         content={
@@ -610,10 +676,9 @@ async def rlm_verify_handler(session_id: str, arguments: dict[str, Any]) -> Tool
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     launcher = await agents_service.load_for_session(pool, session, account_id=account_id)
 
-    async with pool.acquire() as conn:
-        budgets, turn_key = await _admit(
-            conn, session_id=session_id, account_id=account_id, tool_call_id=tool_call_id
-        )
+    budgets, turn_key = await _admit(
+        pool, session_id=session_id, account_id=account_id, tool_call_id=tool_call_id
+    )
     granted = await _resolve_granted(
         pool,
         account_id=account_id,

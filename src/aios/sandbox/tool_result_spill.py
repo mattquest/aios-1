@@ -67,9 +67,15 @@ def spill_variable_name(tool_call_id: str) -> str:
 
     A pure function of ``tool_call_id`` (sanitized to the variable-name
     charset, bounded to the 128-char name cap) so retries and the
-    worker-vs-API append race key the same handle.
+    worker-vs-API append race key the same handle. When truncation is
+    needed, an 8-hex digest of the FULL id is folded in so two long ids
+    sharing a 116-char prefix can never alias one variable.
     """
-    return f"tool_result_{_NAME_SAFE.sub('_', tool_call_id)}"[:128]
+    base = f"tool_result_{_NAME_SAFE.sub('_', tool_call_id)}"
+    if len(base) <= 128:
+        return base
+    digest = hashlib.sha256(tool_call_id.encode()).hexdigest()[:8]
+    return f"{base[:119]}_{digest}"
 
 
 def _bounded_content(content: str) -> str:
@@ -102,21 +108,37 @@ async def cap_tool_result_content(
     if len(content) <= max_chars:
         return CappedToolResult(content=content, variable_name=None)
     name = spill_variable_name(tool_call_id)
+    # The stub must itself respect ``max_chars`` (an operator can configure it
+    # well below the default): reserve ~400 chars for the prose and shrink the
+    # preview to fit. Deterministic given settings, so replay stays pure.
+    preview = content[: min(PREVIEW_CHARS, max(0, max_chars - 400))]
     body = _bounded_content(content)
     encoded = body.encode("utf-8")
-    await queries.spill_tool_result_variable(
-        executor,
-        session_id=session_id,
-        name=name,
-        content=body,
-        content_sha256=hashlib.sha256(encoded).hexdigest(),
-        content_size_bytes=len(encoded),
-        tool_call_id=tool_call_id,
-    )
+    try:
+        await queries.spill_tool_result_variable(
+            executor,
+            session_id=session_id,
+            name=name,
+            content=body,
+            content_sha256=hashlib.sha256(encoded).hexdigest(),
+            content_size_bytes=len(encoded),
+            tool_call_id=tool_call_id,
+        )
+    except asyncpg.UndefinedTableError:
+        # Deploy window (new code, pre-0159 schema): post-deploy migrate has
+        # not landed the table yet. Degrade to the bounded preview alone
+        # rather than erroring the tool result; the window closes minutes
+        # later and the next oversized result spills normally.
+        stub = (
+            f"[Tool result truncated: the full output ({len(content):,} characters) "
+            f"exceeded the inline result limit and the spill store is not yet "
+            f"available. Preview below.]\n{preview}"
+        )
+        return CappedToolResult(content=stub, variable_name=None)
     stub = (
         f"[Tool result spilled: the full output ({len(content):,} characters) exceeded "
         f"the inline result limit and was saved to the context variable {name!r} "
         f"(session scope). Preview below; use ctx_peek/ctx_grep/ctx_eval on {name!r} "
-        f"to read the rest.]\n{content[:PREVIEW_CHARS]}"
+        f"to read the rest.]\n{preview}"
     )
     return CappedToolResult(content=stub, variable_name=name)
