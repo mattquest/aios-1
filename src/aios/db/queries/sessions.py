@@ -303,7 +303,7 @@ async def insert_child_session(
     environment_id: str,
     agent_version: int | None,
     model: str | None,
-    parent_run_id: str,
+    parent_run_id: str | None,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
@@ -1226,6 +1226,7 @@ async def append_request_opened(
     awaited: bool = True,
     output_schema: dict[str, Any] | None = None,
     summary: str | None = None,
+    rlm_token_budget: int | None = None,
 ) -> None:
     """Append the trusted ``request_opened`` lifecycle event — the *ask* half of
     the request edge (#1123).
@@ -1290,6 +1291,11 @@ async def append_request_opened(
         data["output_schema"] = output_schema
     if summary is not None:
         data["summary"] = summary
+    if rlm_token_budget is not None:
+        # rlm spawns only (docs/rlm.md): the child's inherited child-token
+        # allowance, read back by the child's own rlm dispatch admission. Its
+        # presence is also the discriminant marking an rlm spawn edge.
+        data["rlm_token_budget"] = rlm_token_budget
     await queries.append_event(
         conn,
         account_id=account_id,

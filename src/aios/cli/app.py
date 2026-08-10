@@ -97,6 +97,7 @@ from aios.cli.commands import accounts as _accounts  # noqa: E402
 from aios.cli.commands import agents as _agents  # noqa: E402
 from aios.cli.commands import chat as _chat  # noqa: E402
 from aios.cli.commands import connections as _connections  # noqa: E402
+from aios.cli.commands import context_variables as _context_variables  # noqa: E402
 from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
 from aios.cli.commands import init as _init  # noqa: E402
@@ -121,6 +122,7 @@ app.add_typer(_sessions.app, name="sessions")
 app.add_typer(_session_templates.app, name="session-templates")
 app.add_typer(_skills.app, name="skills")
 app.add_typer(_vaults.app, name="vaults")
+app.add_typer(_context_variables.app, name="vars")
 app.add_typer(_connections.app, name="connections")
 app.add_typer(_envs.app, name="envs")
 app.add_typer(_model_providers.app, name="model-providers")

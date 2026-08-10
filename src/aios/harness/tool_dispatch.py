@@ -747,19 +747,12 @@ async def _append_tool_result_event(
     content = event_data.get("content")
     if isinstance(content, str):
         from aios.config import get_settings
-        from aios.sandbox.tool_result_spill import (
-            cap_tool_result_content,
-            record_spill_attachment,
-        )
+        from aios.sandbox.tool_result_spill import cap_tool_result_content
 
         capped = await cap_tool_result_content(
-            session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
+            pool, session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
         event_data["content"] = capped.content
-        # Register any spill file under ``metadata.attachments`` so the
-        # attachment GC's referenced-set sees it as live (#1093).  No-op
-        # when nothing spilled.
-        record_spill_attachment(event_data, capped.attachment)
 
     # ── Pre-lock precompute (issue #991) ──────────────────────────────────
     # The tokenizer pass (and, on the cold path, the parent-channel JSONB ``@>``

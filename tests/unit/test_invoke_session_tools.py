@@ -358,7 +358,18 @@ def test_resumable_tools_are_exactly_the_parking_call_builtins() -> None:
     from aios.tools.registry import registry  # ``aios.tools`` imported at module top
 
     assert registry.resumable_tool_names() == frozenset(
-        {"call_session", "call_agent", "call_workflow", "defer_obligations"}
+        {
+            "call_session",
+            "call_agent",
+            "call_workflow",
+            "defer_obligations",
+            # rlm_query/rlm_verify (docs/rlm.md) park on a single durable
+            # request edge exactly like call_agent — pure-await, re-parkable.
+            # rlm_map is deliberately NOT here: it parks on N edges under one
+            # tool_call_id, which the LIMIT-1 re-park lookup cannot rediscover.
+            "rlm_query",
+            "rlm_verify",
+        }
     )
     for name in registry.resumable_tool_names():
         assert registry.get(name).transport == "agent_tool"

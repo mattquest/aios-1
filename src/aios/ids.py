@@ -75,6 +75,9 @@ REQUEST: Final = "req"
 # api_base for one (account, provider) pair, resolved nearest-ancestor-wins
 # up the account tree at model-call time. See migration 0140.
 MODEL_PROVIDER: Final = "mp"
+# RLM context variables (docs/rlm.md): named out-of-context content handles,
+# session- or agent-scoped. See migration 0159.
+CONTEXT_VARIABLE: Final = "ctxv"
 
 _PREFIXES: Final = frozenset(
     {
@@ -107,6 +110,7 @@ _PREFIXES: Final = frozenset(
         WORKFLOW_EVENT,
         REQUEST,
         MODEL_PROVIDER,
+        CONTEXT_VARIABLE,
     }
 )
 

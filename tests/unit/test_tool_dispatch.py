@@ -957,7 +957,9 @@ class TestAppendToolResultUniqueFloor:
 
         monkeypatch.setattr(
             "aios.sandbox.tool_result_spill.cap_tool_result_content",
-            AsyncMock(side_effect=lambda *a, **k: CappedToolResult(content=a[2], attachment=None)),
+            AsyncMock(
+                side_effect=lambda *a, **k: CappedToolResult(content=a[3], variable_name=None)
+            ),
         )
 
     @staticmethod

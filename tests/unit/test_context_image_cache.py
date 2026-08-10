@@ -542,6 +542,7 @@ class TestPersistClampedImageParts:
             tools: ClassVar[list[Any]] = []
             skill_versions: ClassVar[list[Any]] = []
             obligations: ClassVar[list[Any]] = []
+            context_variables: ClassVar[list[Any]] = []
 
         class _Session:
             id = "sess_gate"
@@ -625,6 +626,7 @@ class TestBuildMessagesOffloadedFromLoop:
             tools: ClassVar[list[Any]] = []
             skill_versions: ClassVar[list[Any]] = []
             obligations: ClassVar[list[Any]] = []
+            context_variables: ClassVar[list[Any]] = []
 
         class _Session:
             id = "sess_thread"

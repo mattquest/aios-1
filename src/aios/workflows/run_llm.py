@@ -66,6 +66,11 @@ from aios.harness.completion import (
     call_litellm,
     estimate_cost_usd,
 )
+from aios.harness.model_tier import (
+    UnknownModelTierError,
+    is_tier_model,
+    resolve_tier_model,
+)
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
@@ -175,6 +180,17 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             },
             0,
         )
+
+    # ``tier:`` resolution (docs/rlm.md) — before the guards, so guards 1-2
+    # see the raw model. This is one of the two seams that bypass the surface
+    # chokepoint in ``services.agents``. Tier values can never themselves be
+    # ``workflow:``/``tier:`` strings (Settings validation), so guard 1 stays
+    # sound post-resolution.
+    if is_tier_model(model):
+        try:
+            model = resolve_tier_model(model, get_settings().model_tiers)
+        except UnknownModelTierError as exc:
+            return {"error": str(exc)}, 0
 
     # Guard 1 — ``workflow:`` rejection (leaf-only). The model arg may be computed,
     # so this is a runtime check at the call site, not a static one.

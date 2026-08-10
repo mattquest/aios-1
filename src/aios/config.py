@@ -331,9 +331,18 @@ class Settings(BaseSettings):
         default=200_000,
         ge=1_000,
         description="Maximum characters of a tool result stored inline in the "
-        "event log. A larger result is spilled to a file under the session's "
-        "attachments mount and replaced inline with a stub pointing the model "
-        "to read it, so a single oversized result can't exceed the context window.",
+        "event log. A larger result is spilled into a session-scoped context "
+        "variable and replaced inline with a stub carrying the variable handle "
+        "plus a preview (docs/rlm.md), so a single oversized result can't "
+        "exceed the context window.",
+    )
+    ctx_peek_max_bytes: int = Field(
+        default=16_384,
+        ge=256,
+        description="Hard per-call cap on the content slice a ``ctx_peek`` tool "
+        "call may return. Larger reads take multiple calls or a ``ctx_grep``/"
+        "``ctx_eval`` — the cap is what keeps out-of-context variables from "
+        "re-entering the prompt wholesale (docs/rlm.md).",
     )
     upload_max_size_bytes: int = Field(
         default=50 * 1024 * 1024,
@@ -668,6 +677,40 @@ class Settings(BaseSettings):
         default=None,
         description="Default model for generic workflow agent() children launched via operator/HTTP runs when no per-run or per-call model is supplied.",
     )
+    model_tiers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Named model tiers (docs/rlm.md): tier name → raw LiteLLM "
+        "model string, resolved late at the surface chokepoint so a config "
+        "remap retargets every future step. The ``rlm_*`` tools accept tier "
+        "names only (e.g. ``sub``, ``verify``); ``tier:<name>`` is the "
+        "model-string scheme. Values may not themselves be ``tier:`` or "
+        "``workflow:`` strings (validated at startup) so the model-binding "
+        "privilege guards cannot be bypassed by indirection. "
+        'Env form: AIOS_MODEL_TIERS=\'{"sub": "openrouter/…", …}\'.',
+    )
+    rlm_max_depth: int = Field(
+        default=2,
+        ge=0,
+        description="Default recursion depth budget for ``rlm_query``/"
+        "``rlm_map`` children of a root session (down-counted on the request "
+        "edge; a child at depth 0 cannot spawn). Enforced in the dispatch "
+        "path, never the prompt (docs/rlm.md).",
+    )
+    rlm_max_children_per_step: int = Field(
+        default=8,
+        ge=1,
+        description="Cap on rlm children spawned by the tool calls of a single "
+        "assistant step of the root session (rlm_map counts each fan-out "
+        "child). Exhaustion returns a structured tool error.",
+    )
+    rlm_max_total_child_tokens: int = Field(
+        default=500_000,
+        ge=1_000,
+        description="Token budget for the rlm child subtree per root turn "
+        "(harvested children's total tokens, accumulated on the root ledger; "
+        "admission refuses new spawns once crossed). Token-based rather than "
+        "USD so unpriced/self-hosted tier models still budget honestly.",
+    )
     workflow_max_inflight_children_per_run: int = Field(
         default=8,
         ge=1,
@@ -968,6 +1011,21 @@ class Settings(BaseSettings):
                 f"strictly less than the harness step budget "
                 f"({HARNESS_STEP_TIMEOUT_S}s)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _model_tiers_values_are_raw(self) -> Settings:
+        # A tier whose value is itself a scheme string would route inference
+        # around the guards that key on the literal model string: a
+        # ``workflow:`` value bypasses the model-binding privilege check and
+        # the call_llm leaf-only rejection; a ``tier:`` value makes resolution
+        # recursive. Both are rejected loudly at startup (docs/rlm.md).
+        for tier, value in self.model_tiers.items():
+            if value.startswith(("tier:", "workflow:")):
+                raise ValueError(
+                    f"AIOS_MODEL_TIERS[{tier!r}] = {value!r}: tier values must be "
+                    "raw provider model strings, never tier:/workflow: schemes"
+                )
         return self
 
     @model_validator(mode="after")

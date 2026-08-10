@@ -55,6 +55,17 @@ from .connector_secrets_secrets import ConnectorSecretsSecrets
 from .context_response import ContextResponse
 from .context_response_messages_item import ContextResponseMessagesItem
 from .context_response_tools_item import ContextResponseToolsItem
+from .context_variable import ContextVariable
+from .context_variable_create import ContextVariableCreate
+from .context_variable_create_kind import ContextVariableCreateKind
+from .context_variable_create_metadata import ContextVariableCreateMetadata
+from .context_variable_create_scope import ContextVariableCreateScope
+from .context_variable_kind import ContextVariableKind
+from .context_variable_metadata import ContextVariableMetadata
+from .context_variable_scope import ContextVariableScope
+from .context_variable_update import ContextVariableUpdate
+from .context_variable_update_kind_type_0 import ContextVariableUpdateKindType0
+from .context_variable_update_metadata_type_0 import ContextVariableUpdateMetadataType0
 from .cron_source import CronSource
 from .deny_all import DenyAll
 from .draft_streaming import DraftStreaming
@@ -91,6 +102,8 @@ from .inline_script_body_input_schema_type_0 import InlineScriptBodyInputSchemaT
 from .inline_script_body_output_schema_type_0 import InlineScriptBodyOutputSchemaType0
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
+from .list_context_variables_kind_type_0 import ListContextVariablesKindType0
+from .list_context_variables_scope_type_0 import ListContextVariablesScopeType0
 from .list_response_agent import ListResponseAgent
 from .list_response_agent_version import ListResponseAgentVersion
 from .list_response_annotated_union_memory_store_resource_echo_github_repository_resource_echo_field_infoannotation_none_type_required_true_discriminatortype import (
@@ -98,6 +111,7 @@ from .list_response_annotated_union_memory_store_resource_echo_github_repository
 )
 from .list_response_bound_chat import ListResponseBoundChat
 from .list_response_connection import ListResponseConnection
+from .list_response_context_variable import ListResponseContextVariable
 from .list_response_environment import ListResponseEnvironment
 from .list_response_event import ListResponseEvent
 from .list_response_memory_store import ListResponseMemoryStore
@@ -401,6 +415,17 @@ __all__ = (
     "ContextResponse",
     "ContextResponseMessagesItem",
     "ContextResponseToolsItem",
+    "ContextVariable",
+    "ContextVariableCreate",
+    "ContextVariableCreateKind",
+    "ContextVariableCreateMetadata",
+    "ContextVariableCreateScope",
+    "ContextVariableKind",
+    "ContextVariableMetadata",
+    "ContextVariableScope",
+    "ContextVariableUpdate",
+    "ContextVariableUpdateKindType0",
+    "ContextVariableUpdateMetadataType0",
     "CronSource",
     "DenyAll",
     "DraftStreaming",
@@ -433,11 +458,14 @@ __all__ = (
     "InlineScriptBodyOutputSchemaType0",
     "LimitedNetworking",
     "ListConnectionsModeType0",
+    "ListContextVariablesKindType0",
+    "ListContextVariablesScopeType0",
     "ListResponseAgent",
     "ListResponseAgentVersion",
     "ListResponseAnnotatedUnionMemoryStoreResourceEchoGithubRepositoryResourceEchoFieldInfoannotationNoneTypeRequiredTrueDiscriminatortype",
     "ListResponseBoundChat",
     "ListResponseConnection",
+    "ListResponseContextVariable",
     "ListResponseEnvironment",
     "ListResponseEvent",
     "ListResponseMemoryStore",

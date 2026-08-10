@@ -8,6 +8,7 @@ and inject environment variables at container provisioning time.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -505,7 +506,7 @@ class AskNewSession:
     environment_id: str
     agent_version: int | None
     model: str | None
-    parent_run_id: str
+    parent_run_id: str | None
     surface: Surface
     vault_ids: list[str]
     request_id: str
@@ -514,6 +515,16 @@ class AskNewSession:
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
     workspace_path: str | None = None
+    # Trusted caller override for session-launched spawns (the rlm_* tools —
+    # docs/rlm.md). ``None`` keeps the workflow default ``{kind:'run',
+    # id:parent_run_id}``; exactly one of the two must identify the caller.
+    caller: dict[str, Any] | None = None
+    # Read-only context-variable grants written inside the spawn transaction
+    # (the rlm_query variable-mount mechanism) — ids, resolved by the caller.
+    context_variable_ids: list[str] = dataclasses.field(default_factory=list)
+    # Token budget carried on the request edge: the child's total rlm child-token
+    # allowance, inherited-and-decremented down the spawn tree (docs/rlm.md).
+    rlm_token_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -665,6 +676,12 @@ async def create_child_session(
     """
     awaited = isinstance(stim, AskNewSession)
     output_schema = stim.output_schema if isinstance(stim, AskNewSession) else None
+    caller = stim.caller if isinstance(stim, AskNewSession) and stim.caller is not None else None
+    if caller is None:
+        # The workflow default: the run is the caller. A session-launched spawn
+        # (rlm_*) passes an explicit ``caller`` and no ``parent_run_id``.
+        assert stim.parent_run_id is not None
+        caller = {"kind": "run", "id": stim.parent_run_id}
     content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
     async with pool.acquire() as conn, conn.transaction():
         child = await queries.insert_child_session(
@@ -687,6 +704,15 @@ async def create_child_session(
         if stim.vault_ids:
             await queries.set_session_vaults(
                 conn, stim.session_id, stim.vault_ids, account_id=account_id
+            )
+        if isinstance(stim, AskNewSession) and stim.context_variable_ids:
+            # Read-only variable grants (docs/rlm.md): written inside the spawn
+            # transaction, pinned by the first-spawn check above, so a replay
+            # re-asserts identical grants idempotently.
+            await queries.insert_context_variable_grants(
+                conn,
+                session_id=stim.session_id,
+                variable_ids=stim.context_variable_ids,
             )
             # No advisory containment gate here: ``create_child_session`` is an
             # internal workflow spawn (no console to surface a fast 422), and its
@@ -721,7 +747,7 @@ async def create_child_session(
             session_id=stim.session_id,
             account_id=account_id,
             request_id=stim.request_id,
-            caller={"kind": "run", "id": stim.parent_run_id},
+            caller=caller,
             depth=stim.depth,
             environment_id=stim.environment_id,
             frozen_surface={
@@ -733,6 +759,7 @@ async def create_child_session(
             awaited=awaited,
             output_schema=output_schema,
             summary=_obligation_summary(content),
+            rlm_token_budget=(stim.rlm_token_budget if isinstance(stim, AskNewSession) else None),
         )
         return True
 
@@ -2060,18 +2087,13 @@ async def append_tool_result(
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
     """
-    from aios.sandbox.tool_result_spill import (
-        cap_tool_result_content,
-        record_spill_attachment,
-    )
+    from aios.sandbox.tool_result_spill import cap_tool_result_content
 
-    spill_attachment: dict[str, Any] | None = None
     if isinstance(content, str):
         capped = await cap_tool_result_content(
-            session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
+            conn, session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
         content = capped.content
-        spill_attachment = capped.attachment
 
     # ── Pre-lock precompute (issue #991, Parts 1 + 2) ─────────────────────
     # Resolve the parent assistant's name AND ``focal_channel_at_arrival`` in a
@@ -2094,10 +2116,6 @@ async def append_tool_result(
     }
     if is_error:
         data["is_error"] = True
-    # Register any spill file under ``metadata.attachments`` so the attachment
-    # GC's referenced-set sees it as live (#1093).  Done before the precompute
-    # so the stored event and its token estimate reflect the same shape.
-    record_spill_attachment(data, spill_attachment)
     precomputed = await queries.precompute_event_append(
         conn,
         account_id=account_id,

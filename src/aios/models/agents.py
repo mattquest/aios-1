@@ -69,6 +69,14 @@ BuiltinToolType = Literal[
     "list_tasks",
     "skill_upsert",
     "skill_archive",
+    "ctx_list",
+    "ctx_peek",
+    "ctx_grep",
+    "ctx_write",
+    "ctx_eval",
+    "rlm_query",
+    "rlm_map",
+    "rlm_verify",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

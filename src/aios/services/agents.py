@@ -11,8 +11,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.errors import ForbiddenError
+from aios.harness.model_tier import resolve_tier_model
 from aios.models.agents import (
     Agent,
     AgentBinding,
@@ -303,12 +305,17 @@ def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> S
     A missing field here is a compile-loud ``StepSurface`` construction error,
     not a silent structural-overlap drift — the projection's drift surface is
     mypy, not runtime.
+
+    ``tier:`` model strings resolve here (docs/rlm.md) — the surface
+    chokepoint — so every downstream consumer (capability gates, window
+    math, provider auth, dispatch, spans) sees a raw provider model with no
+    per-site edits, and a config remap retargets on the next step.
     """
     return StepSurface(
         tools=agent.tools,
         mcp_servers=agent.mcp_servers,
         http_servers=agent.http_servers,
-        model=agent.model,
+        model=resolve_tier_model(agent.model, get_settings().model_tiers),
         system=agent.system,
         skills=agent.skills,
         litellm_extra=agent.litellm_extra,
@@ -347,9 +354,10 @@ async def _load_for_session_conn(
             # it an explicit ``generic_child`` binding keyed on its own session
             # — no ``agent_id=""``/``version=0`` sentinel.
             defaults = AgentCreate.model_fields
+            model = resolve_tier_model(session.model, get_settings().model_tiers)
             return StepSurface(
-                model=session.model,
-                system=GENERIC_CHILD_SYSTEM.format(model=session.model),
+                model=model,
+                system=GENERIC_CHILD_SYSTEM.format(model=model),
                 tools=frozen.tools,
                 skills=[],
                 mcp_servers=frozen.mcp_servers,

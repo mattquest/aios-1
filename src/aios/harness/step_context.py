@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         StepSurface,
         ToolSpec,
     )
+    from aios.models.context_variables import ContextVariable
     from aios.models.events import Event
     from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
@@ -150,6 +151,11 @@ class StepPrelude:
     tail_block_upper_bound_local: int
     obligations: list[Obligation]
     obligations_block_upper_bound_local: int
+    # Readable context-variable roster (docs/rlm.md), fetched once here
+    # (metadata only, gated on the surface holding ctx/rlm tools) and reused
+    # by the composer to render the ctx-vars tail — no second query.
+    context_variables: list[ContextVariable]
+    context_vars_block_upper_bound_local: int
 
 
 class PreludeOverheadSplit(NamedTuple):
@@ -197,6 +203,7 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     reserves_local = (
         prelude.tail_block_upper_bound_local
         + prelude.obligations_block_upper_bound_local
+        + prelude.context_vars_block_upper_bound_local
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
     return PreludeOverheadSplit(
@@ -280,6 +287,11 @@ async def compute_step_prelude(
         augment_with_focal_paradigm,
         max_tail_block_local,
     )
+    from aios.harness.context_vars import (
+        augment_with_context_vars,
+        max_context_vars_block_local,
+        surface_has_ctx_tools,
+    )
     from aios.harness.loop import (
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
@@ -308,6 +320,7 @@ async def compute_step_prelude(
     # ``bool(obligations)``, correctness-equivalent to the old gate (the same
     # awaited anti-join), trading the fast-path for one indexed anti-join per
     # background-child step (a stated, accepted cost).
+    has_ctx_tools = surface_has_ctx_tools(agent.tools)
     async with pool.acquire() as conn:
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
         # #1747: ratchet the monotone open-request scan-floor on the same
@@ -315,6 +328,20 @@ async def compute_step_prelude(
         # ``_advance_open_request_scan_floor_best_effort`` for why failures
         # here must never propagate.
         await _advance_open_request_scan_floor_best_effort(conn, session_id, account_id=account_id)
+        # Readable context-variable roster (docs/rlm.md), metadata only — the
+        # per-step affordance that keeps a long-lived agent from cold-starting
+        # blind. Gated on the surface actually holding ctx/rlm tools so every
+        # other agent pays nothing.
+        context_variables = (
+            await queries.list_readable_variables(
+                conn,
+                account_id=account_id,
+                session_id=session_id,
+                agent_id=session.agent_id,
+            )
+            if has_ctx_tools
+            else []
+        )
     owes_request = bool(obligations)
     if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs
@@ -370,6 +397,7 @@ async def compute_step_prelude(
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
     system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
+    system_prompt = augment_with_context_vars(system_prompt, enabled=has_ctx_tools)
     system_prompt = augment_with_resource_health(
         system_prompt,
         degraded_repos=_session_degraded_repos(github_repo_echoes),
@@ -383,6 +411,8 @@ async def compute_step_prelude(
         tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
         obligations_block_upper_bound_local=max_obligations_block_local(obligations),
+        context_variables=context_variables,
+        context_vars_block_upper_bound_local=max_context_vars_block_local(context_variables),
     )
 
 
@@ -598,6 +628,7 @@ async def compose_step_context(
     (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
+    from aios.harness.context_vars import build_context_vars_tail_block
     from aios.harness.obligations import build_obligations_tail_block
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
@@ -683,6 +714,13 @@ async def compose_step_context(
     # obligation IS the stimulus to act on, so it renders even after a tool
     # result (where ``build_obligations_tail_block`` returning non-None already
     # encodes "non-empty").
+    # Context-variable roster (docs/rlm.md): background affordance, never the
+    # stimulus — appended BEFORE the obligations block so an open obligation
+    # stays the final user-role line (literal-minded models anchor on it).
+    context_vars_block = build_context_vars_tail_block(prelude.context_variables)
+    if context_vars_block is not None:
+        ctx.messages.append(context_vars_block)
+
     obligations_block = build_obligations_tail_block(prelude.obligations, session_id=session.id)
     if obligations_block is not None:
         ctx.messages.append(obligations_block)
