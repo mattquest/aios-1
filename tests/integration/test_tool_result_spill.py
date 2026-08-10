@@ -6,23 +6,26 @@ A single tool result larger than the model context budget wedges the
 session — windowing can only drop whole events, never shrink one, so a
 lone oversized result can't be shed.  The fix caps the result content at
 the SERVICE append sink (``sessions_service.append_tool_result``): the
-inline body is replaced with a stub pointing the model at the full output
-spilled under the session's attachments mount, recoverable via ``read``.
+inline body is replaced with a handle+preview stub and the full output is
+spilled into a session-scoped ``kind='spill'`` context variable
+(``sandbox/tool_result_spill.py``, docs/rlm.md), recoverable via the
+``ctx_*`` tools instead of re-entering the prompt wholesale.
 
 This test drives the real service sink against a testcontainer Postgres,
 then asserts:
 
-* oversized → the stored tool event content is a ``[Tool result
-  truncated:`` stub naming ``/mnt/attachments/tool_results/`` AND the full
-  body is on the host spill file, byte-for-byte.
-* within-cap → the content is stored verbatim, no spill file written.
+* oversized → the stored tool event content is a ``[Tool result spilled:``
+  stub naming the spill variable handle and carrying the deterministic
+  preview, AND the full body sits in a session-scoped ``kind='spill'``
+  context variable, byte-for-byte with a matching sha256.
+* within-cap → the content is stored verbatim, no variable row written.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -33,26 +36,33 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.models.agents import ToolSpec
-from aios.sandbox.volumes import ensure_session_attachments_dir
+from aios.sandbox.tool_result_spill import PREVIEW_CHARS, spill_variable_name
 from aios.services import sessions as sessions_service
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
-_DEFAULT_MAX_CHARS = 200_000
+# Pinned via AIOS_TOOL_RESULT_MAX_CHARS below so the test controls the cap
+# instead of tracking the production default.
+_MAX_CHARS = 5_000
+
+
+def _payload(chars: int) -> str:
+    """Distinct numbered lines so the preview assertion is meaningful."""
+    lines = [f"row-{i:08d}" for i in range(chars // 13 + 1)]
+    return "\n".join(lines)[:chars]
 
 
 @pytest.fixture
 async def spill_session(
-    migrated_db_url: str, _reset_db_state: None, tmp_path: Path
+    migrated_db_url: str, _reset_db_state: None
 ) -> AsyncIterator[tuple[asyncpg.Pool[Any], str, str]]:
     """Yield ``(pool, session_id, tool_call_id)`` for a session whose event
     log contains an assistant message carrying a single ``tool_calls`` entry
-    (so ``append_tool_result`` finds a parent), with ``workspace_root``
-    pointed at an isolated ``tmp_path`` so the spill file lands somewhere we
-    can read on the host.
+    (so ``append_tool_result`` finds a parent), with the inline cap pinned
+    to ``_MAX_CHARS``.
     """
-    with mock.patch.dict(os.environ, {"AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces")}):
+    with mock.patch.dict(os.environ, {"AIOS_TOOL_RESULT_MAX_CHARS": str(_MAX_CHARS)}):
         get_settings.cache_clear()
         pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
         try:
@@ -97,19 +107,13 @@ async def spill_session(
             get_settings.cache_clear()
 
 
-async def _stored_tool_event(
-    pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str
-) -> dict[str, Any]:
+async def _stored_tool_content(pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str) -> str:
     async with pool.acquire() as conn:
         event = await queries.find_tool_result_event(
             conn, session_id, tool_call_id, account_id="acc_spill"
         )
     assert event is not None
-    return event.data
-
-
-async def _stored_tool_content(pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str) -> str:
-    content = (await _stored_tool_event(pool, session_id, tool_call_id))["content"]
+    content = event.data["content"]
     assert isinstance(content, str)
     return content
 
@@ -120,8 +124,8 @@ class TestToolResultSpill:
         spill_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, session_id, tool_call_id = spill_session
-        original = "X" * 300_000  # > the 200_000 default cap
-        assert len(original) > _DEFAULT_MAX_CHARS
+        original = _payload(4 * _MAX_CHARS)
+        assert len(original) > _MAX_CHARS
 
         async with pool.acquire() as conn:
             await sessions_service.append_tool_result(
@@ -132,63 +136,34 @@ class TestToolResultSpill:
                 content=original,
             )
 
+        name = spill_variable_name(tool_call_id)
         stored = await _stored_tool_content(pool, session_id, tool_call_id)
-        assert stored.startswith("[Tool result truncated:")
-        assert "/mnt/attachments/tool_results/" in stored
+        assert stored.startswith("[Tool result spilled:")
+        assert f"{name!r}" in stored  # the stub names the recovery handle
+        assert stored.endswith(original[:PREVIEW_CHARS])  # deterministic preview
         assert len(stored) < len(original)
 
-        spill_file = (
-            ensure_session_attachments_dir(session_id) / "tool_results" / f"{tool_call_id}.txt"
-        )
-        assert spill_file.exists()
-        assert spill_file.read_text(encoding="utf-8") == original
-
-        # #1093: the spill file must be recorded under the tool event's
-        # ``metadata.attachments`` (the single convention staged inbounds use)
-        # so the attachment GC's referenced-set protects it. Its
-        # ``in_sandbox_path`` must match the path the GC walk reconstructs for
-        # the on-disk file.
-        data = await _stored_tool_event(pool, session_id, tool_call_id)
-        attachments = data["metadata"]["attachments"]
-        assert isinstance(attachments, list) and len(attachments) == 1
-        assert (
-            attachments[0]["in_sandbox_path"] == f"/mnt/attachments/tool_results/{tool_call_id}.txt"
-        )
-
-    async def test_spill_path_is_in_gc_referenced_set(
-        self,
-        spill_session: tuple[asyncpg.Pool[Any], str, str],
-    ) -> None:
-        """End-to-end #1093 guard: after an oversized result spills, the
-        attachment GC's referenced-set query (``list_attachment_paths_for_sessions``)
-        — built exclusively from ``data->'metadata'->'attachments'`` — must
-        return the spill file's sandbox path. Pre-fix the spill reference lived
-        only in the result content stub, so this query returned an empty set
-        and the orphan sweep deleted the file on the next worker boot.
-        """
-        pool, session_id, tool_call_id = spill_session
-        original = "Z" * 300_000
-
+        # The full body lives in the session-scoped spill variable,
+        # byte-for-byte, with the matching content sha.
         async with pool.acquire() as conn:
-            await sessions_service.append_tool_result(
-                conn,
-                account_id="acc_spill",
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                content=original,
+            var = await queries.resolve_readable_variable(
+                conn, account_id="acc_spill", session_id=session_id, agent_id=None, name=name
             )
-
-        async with pool.acquire() as conn:
-            referenced = await queries.list_attachment_paths_for_sessions(conn, [session_id])
-
-        assert f"/mnt/attachments/tool_results/{tool_call_id}.txt" in referenced[session_id]
+        assert var is not None
+        assert var.scope == "session"
+        assert var.session_id == session_id
+        assert var.kind == "spill"
+        assert var.content == original
+        assert var.content_sha256 == hashlib.sha256(original.encode("utf-8")).hexdigest()
+        assert var.content_size_bytes == len(original.encode("utf-8"))
+        assert var.metadata == {"tool_call_id": tool_call_id}
 
     async def test_within_cap_result_stored_verbatim(
         self,
         spill_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, session_id, tool_call_id = spill_session
-        original = "Y" * 100  # well under the cap
+        original = _payload(100)  # well under the cap
 
         async with pool.acquire() as conn:
             await sessions_service.append_tool_result(
@@ -202,9 +177,17 @@ class TestToolResultSpill:
         stored = await _stored_tool_content(pool, session_id, tool_call_id)
         assert stored == original
 
-        spill_file = (
-            ensure_session_attachments_dir(session_id) / "tool_results" / f"{tool_call_id}.txt"
-        )
-        # ``ensure_session_attachments_dir`` creates the session dir, but the
-        # tool_results spill subdir + file must NOT exist for a within-cap result.
-        assert not spill_file.exists()
+        # No spill: no context-variable row lands for the session.
+        async with pool.acquire() as conn:
+            var = await queries.resolve_readable_variable(
+                conn,
+                account_id="acc_spill",
+                session_id=session_id,
+                agent_id=None,
+                name=spill_variable_name(tool_call_id),
+            )
+            count = await conn.fetchval(
+                "SELECT count(*) FROM context_variables WHERE session_id = $1", session_id
+            )
+        assert var is None
+        assert count == 0

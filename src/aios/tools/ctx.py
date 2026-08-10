@@ -157,7 +157,10 @@ async def ctx_grep_handler(session_id: str, arguments: dict[str, Any]) -> dict[s
         matches: list[dict[str, Any]] = []
         total = 0
         offset = 0
-        for line_no, line in enumerate((variable.content or "").splitlines(), start=1):
+        # ``split("\n")`` (not ``splitlines``) so the byte-offset accumulation
+        # below stays exact: splitlines also breaks on \r/\u2028 etc., which
+        # would drift offsets advertised as ctx_peek-compatible.
+        for line_no, line in enumerate((variable.content or "").split("\n"), start=1):
             if pattern.search(line):
                 total += 1
                 if len(matches) < args.max_matches:
