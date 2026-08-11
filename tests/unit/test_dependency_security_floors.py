@@ -67,10 +67,13 @@ def test_manifest_floors_declared() -> None:
     reqs = _direct_requirements()
 
     litellm = reqs["litellm"]
-    assert not litellm.specifier.contains("1.83.6", prereleases=True), (
-        "litellm floor must exclude <1.83.7 (CVE-2026-42208)"
+    assert not litellm.specifier.contains("1.91.2", prereleases=True), (
+        "litellm floor must exclude <1.91.3 (known proxy-code criticals)"
     )
-    assert litellm.specifier.contains("1.83.7", prereleases=True)
+    assert litellm.specifier.contains("1.91.3", prereleases=True)
+    assert not litellm.specifier.contains("1.92.0", prereleases=True), (
+        "litellm must stay below 1.92 until portable wheels return"
+    )
 
     h11 = reqs["h11"]
     assert not h11.specifier.contains("0.15", prereleases=True), (

@@ -38,9 +38,9 @@ async def _fetchval(db_url: str, sql: str) -> object:
 
 @needs_docker
 @pytest.mark.integration
-def test_0114_backfills_orphans_and_adds_valid_cascade_fk(postgres: object) -> None:
+def test_0162_backfills_orphans_and_adds_valid_cascade_fk(postgres: object) -> None:
     db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "0113"], db_url).returncode == 0
+    assert _run_alembic(["upgrade", "0161"], db_url).returncode == 0
     asyncio.run(
         _execute(
             db_url,
@@ -57,7 +57,7 @@ def test_0114_backfills_orphans_and_adds_valid_cascade_fk(postgres: object) -> N
         )
     )
 
-    up = _run_alembic(["upgrade", "0114"], db_url)
+    up = _run_alembic(["upgrade", "0162"], db_url)
     assert up.returncode == 0, f"upgrade failed:\n{up.stderr}\n{up.stdout}"
     assert (
         asyncio.run(
@@ -92,10 +92,10 @@ def test_0114_backfills_orphans_and_adds_valid_cascade_fk(postgres: object) -> N
 
 @needs_docker
 @pytest.mark.integration
-def test_0114_clean_downgrade_removes_receipt_and_fk(postgres: object) -> None:
+def test_0162_clean_downgrade_removes_receipt_and_fk(postgres: object) -> None:
     db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "0114"], db_url).returncode == 0
-    down = _run_alembic(["downgrade", "0113"], db_url)
+    assert _run_alembic(["upgrade", "0162"], db_url).returncode == 0
+    down = _run_alembic(["downgrade", "0161"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
     assert (
         asyncio.run(

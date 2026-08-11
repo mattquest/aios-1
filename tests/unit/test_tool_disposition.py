@@ -256,7 +256,15 @@ class TestMcpBranch:
         )
 
     def test_registered_enabled_mcp_server_with_map_not_unknown(self) -> None:
-        agent = _agent(tools=[ToolSpec(type="mcp_toolset", mcp_server_name="srv")])
+        agent = _agent(
+            tools=[
+                ToolSpec(
+                    type="mcp_toolset",
+                    mcp_server_name="srv",
+                    permission="always_ask",
+                )
+            ]
+        )
         server = McpServerSpec(name="srv", url="https://x.example")
         assert (
             classify_tool_call(

@@ -33,6 +33,18 @@ def _ok_response() -> _DictResponse:
     )
 
 
+def _request(
+    session_id: str,
+    *,
+    params: dict[str, object] | None = None,
+) -> completion.LlmRequest:
+    return completion.LlmRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        params=params,
+        session_id=session_id,
+    )
+
+
 @pytest.mark.asyncio
 async def test_call_litellm_xai_merges_stable_conversation_header(
     monkeypatch: pytest.MonkeyPatch,
@@ -47,10 +59,8 @@ async def test_call_litellm_xai_merges_stable_conversation_header(
     agent_headers = {"x-agent-trace": "keep", "X-Grok-Conv-Id": "wrong"}
 
     await completion.call_litellm(
+        _request("sess_stable", params={"extra_headers": agent_headers}),
         model="xai/grok-4.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_stable",
-        extra={"extra_headers": agent_headers},
     )
 
     assert captured["extra_headers"] == {
@@ -82,13 +92,12 @@ async def test_stream_litellm_xai_sends_same_conversation_header(
         return _EmptyResponse()
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-    monkeypatch.setattr(litellm, "stream_chunk_builder", lambda chunks: _ok_response())
+    monkeypatch.setattr(litellm, "stream_chunk_builder", lambda **_kwargs: _ok_response())
 
     await completion.stream_litellm(
+        _request("sess_stream"),
         model="xai/grok-4.5",
-        messages=[{"role": "user", "content": "hi"}],
         pool=_StubPool(),
-        session_id="sess_stream",
     )
 
     assert captured["extra_headers"] == {"x-grok-conv-id": "sess_stream"}
@@ -124,16 +133,15 @@ async def test_stream_litellm_preserves_wire_xai_billed_ticks(
     assembled["usage"] = {"prompt_tokens": 1, "completion_tokens": 1}
     assembled._hidden_params["response_cost"] = 7.0
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-    monkeypatch.setattr(litellm, "stream_chunk_builder", lambda chunks: assembled)
+    monkeypatch.setattr(litellm, "stream_chunk_builder", lambda **_kwargs: assembled)
 
-    _, _, cost, _ = await completion.stream_litellm(
+    response = await completion.stream_litellm(
+        _request("sess_cost"),
         model="xai/grok-4.5",
-        messages=[{"role": "user", "content": "hi"}],
         pool=_StubPool(),
-        session_id="sess_cost",
     )
 
-    assert cost == 0.0025
+    assert response.cost == 0.0025
 
 
 @pytest.mark.parametrize(
@@ -158,9 +166,8 @@ async def test_non_direct_grok_routes_do_not_receive_xai_header(
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     await completion.call_litellm(
+        _request("sess_no_header"),
         model=model,
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_no_header",
     )
 
     headers = cast("dict[str, str] | None", captured.get("extra_headers"))
@@ -209,10 +216,11 @@ async def test_xai_conversation_id_reaches_http_header(
     )
 
     await completion.call_litellm(
+        _request(
+            "sess_wire",
+            params={"extra_headers": {"x-agent-trace": "keep"}},
+        ),
         model="xai/grok-4.5",
-        messages=[{"role": "user", "content": "hi"}],
-        session_id="sess_wire",
-        extra={"extra_headers": {"x-agent-trace": "keep"}},
     )
 
     assert captured_headers is not None

@@ -47,10 +47,12 @@ _ACCOUNT_CASCADE_DELETE_TABLES: tuple[str, ...] = (
     "bindings",
     "chat_sessions",
     "events",
+    "session_cancel_markers",
     "files",
     "session_github_repositories",
     "session_memory_stores",
     "session_vaults",
+    "context_variables",
     "sessions",
     "connections",
     "vault_credentials",
@@ -68,6 +70,7 @@ _ACCOUNT_CASCADE_DELETE_TABLES: tuple[str, ...] = (
     "runtimes",
     "pending_management_calls",
     "inbound_acks",
+    "model_providers",
     "credentials",
     "account_keys",
 )
@@ -857,7 +860,9 @@ async def hard_delete_account(conn: asyncpg.Connection[Any], account_id: str) ->
 def _row_to_cascade_purge_receipt(row: asyncpg.Record) -> AccountCascadePurgeReceipt:
     raw_manifest = row["manifest"]
     manifest = (
-        AccountCascadePurgeManifest.model_validate(parse_jsonb(raw_manifest))
+        AccountCascadePurgeManifest.model_validate(
+            raw_manifest if isinstance(raw_manifest, dict) else json.loads(raw_manifest)
+        )
         if raw_manifest is not None
         else None
     )
@@ -1045,6 +1050,7 @@ async def cascade_hard_delete_account_resources(
     for table in (
         "sessions",
         "agents",
+        "context_variables",
         "environments",
         "vault_credentials",
         "vaults",
@@ -1053,6 +1059,7 @@ async def cascade_hard_delete_account_resources(
         "session_templates",
         "connections",
         "credentials",
+        "model_providers",
         "workflows",
     ):
         await conn.execute(
