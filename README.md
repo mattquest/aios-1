@@ -21,7 +21,7 @@ Its entire memory is **one append-only event log**. Status, spend, and "what is 
 - [Harness & step model](#the-harness--step-model) · [Sessions, agents & events](#sessions-agents--events)
 - [Workflows](#workflows--durable-replayable-orchestration) · [Invocation kernel](#the-unified-invocation-kernel) · [Triggers](#triggers--scheduling)
 - [Connectors & multi-channel](#connectors--multi-channel) · [Sandboxes & environments](#durable-sandboxes--environments)
-- [Tools, MCP & permissions](#tools-mcp--permissions) · [Memory & skills](#memory-stores--skills) · [Vaults](#vaults--credential-injection)
+- [Tools, MCP & permissions](#tools-mcp--permissions) · [RLM (this fork)](#rlm--context-variables--recursive-sub-queries-this-fork) · [Memory & skills](#memory-stores--skills) · [Vaults](#vaults--credential-injection)
 - [Security model](#security-model) · [Accounts & multi-tenancy](#accounts-multi-tenancy--spend) · [API, CLI & SDK](#api-cli--sdk--one-surface-three-faces)
 - [Multimodal & files](#multimodal-files--attachments) · [vs. Anthropic Managed Agents](#vs-anthropic-managed-agents) · [Roadmap](#roadmap--where-this-is-heading) · [License](#license)
 
@@ -638,6 +638,40 @@ Every tool is registered once against a module-level `ToolRegistry`; the same pu
 </details>
 
 ---
+
+## RLM — context variables & recursive sub-queries (this fork)
+
+The `cos-runtime` branch adds a **Recursive Language Model substrate**
+([docs/rlm.md](docs/rlm.md)): the agent never holds its working state in the
+prompt window — state lives as addressable **context variables** (session- or
+agent-scoped named handles; content out of context, metadata cheap to list)
+that it inspects programmatically and recursively queries via cheap sub-model
+calls, so effective context is unbounded and nothing decays.
+
+- **`ctx_list` / `ctx_peek` / `ctx_grep` / `ctx_write` / `ctx_eval`** — list
+  metadata, read hard-capped slices, regex-search server-side, persist state
+  (agent scope = a world model that outlives every session), and run Python
+  over staged variables in the session sandbox. Reusable scripts persist as
+  `kind='helper'` variables and re-run by name, so competence compounds.
+- **Spill inversion** — an oversized tool result now spills *into* a
+  session-scoped variable; the event stores a handle + deterministic preview
+  instead of a truncation stub.
+- **`rlm_query` / `rlm_map` / `rlm_verify`** — spawn attenuated generic child
+  sessions (ordinary async tool calls riding the invocation kernel: clamped
+  surfaces, frozen at spawn, read-only variable grants in the spawn
+  transaction, crash-re-parkable parks) with **dispatch-path budgets**: depth
+  down-counted on the request edge, children-per-step and child-tokens-per-turn
+  on a per-session ledger. `rlm_verify` returns a
+  `{supported, evidence[{var, quote}]}` verdict from a child that can only
+  read the cited variables — verification before assertion.
+- **Model tiers** — `AIOS_MODEL_TIERS='{"root":…,"sub":…,"verify":…}'` plus a
+  `tier:` model-string scheme resolved late at the surface chokepoint; rlm
+  tools accept tier names only, so sub-call unit economics live in one knob.
+- **Operator plane** — `/v1/context-variables` + `aios vars`.
+
+The first consumer is a chief-of-staff agent for solopreneurs, shipped as a
+versioned template from a separate repo (agent JSON + world-model variable
+seeds + skills + cron routines) against this substrate.
 
 ## Memory stores & skills
 
