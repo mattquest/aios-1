@@ -591,3 +591,35 @@ async def test_get_session_usage_zero_default_for_missing_session(pool: asyncpg.
         usage = await queries.get_session_usage(conn, "sess_missing", account_id=ACC)
     assert (usage.input_tokens, usage.output_tokens, usage.cost_microusd) == (0, 0, 0)
     assert usage.total_tokens == 0
+
+
+# ─── agentless rlm child insert (migration 0160 regression) ─────────────────
+
+
+async def test_agentless_rlm_child_insert_passes_sessions_check(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """An rlm child is agentless with NO parent_run_id — the 0095 CHECK
+    (``agentless ⇒ workflow child``) rejected that row live on the first
+    ``rlm_verify`` smoke. Migration 0160 widens the invariant to
+    ``agentless ⇒ spawned generic child`` (``surface_frozen AND model``);
+    this pins the INSERT the tool path actually performs."""
+    _, env, _ = await seed_agent_env_session(pool, account_id=ACC, prefix="rlmchild")
+    async with pool.acquire() as conn:
+        created = await queries.insert_child_session(
+            conn,
+            session_id="sess_0RLMCHILDINSERTCHECK00000A",
+            account_id=ACC,
+            agent_id=None,
+            environment_id=env.id,
+            agent_version=None,
+            model="tier:verify",
+            parent_run_id=None,
+            tools=[],
+            mcp_servers=[],
+            http_servers=[],
+        )
+    assert created is not None
+    assert created.agent_id is None
+    assert created.parent_run_id is None
+    assert created.model == "tier:verify"
