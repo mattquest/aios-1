@@ -374,3 +374,70 @@ class TestCircuitBreaker:
         assert pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3") is None
         # Other vaults' entries survive.
         assert pool.get_cached_tools(URL, "vlt_2", EMPTY_KEY, "agt_1:3") is not None
+
+    def test_lookup_cached_tool_parameters_from_openai_envelope(self) -> None:
+        """Dispatch reads sanitized ``function.parameters`` off the cached
+        OpenAI-shaped dicts ``discover_mcp_tools`` stores — not a parallel
+        registry."""
+        schema = {
+            "type": "object",
+            "properties": {"athlete_id": {"type": "string"}},
+            "required": ["athlete_id"],
+        }
+        envelope = {
+            "type": "function",
+            "function": {
+                "name": "mcp__kine__propose_workout",
+                "description": "",
+                "parameters": schema,
+            },
+        }
+        pool = McpSessionPool()
+        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [envelope], None)
+        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout") == schema
+        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout", url=URL) == schema
+        assert (
+            pool.lookup_cached_tool_parameters(
+                "mcp__kine__propose_workout", url="https://other.example/"
+            )
+            is None
+        )
+        assert pool.lookup_cached_tool_parameters("mcp__kine__missing") is None
+
+    def test_lookup_cached_tool_parameters_newest_binding_wins(self) -> None:
+        old_schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        new_schema = {"type": "object", "properties": {"b": {"type": "number"}}}
+        pool = McpSessionPool()
+        pool.set_cached_tools(
+            URL,
+            "v",
+            EMPTY_KEY,
+            "agt_1:3",
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__kine__propose_workout",
+                        "parameters": old_schema,
+                    },
+                }
+            ],
+            None,
+        )
+        pool.set_cached_tools(
+            URL,
+            "v",
+            EMPTY_KEY,
+            "agt_1:4",
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__kine__propose_workout",
+                        "parameters": new_schema,
+                    },
+                }
+            ],
+            None,
+        )
+        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout") == new_schema

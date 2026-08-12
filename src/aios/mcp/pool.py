@@ -649,6 +649,33 @@ class McpSessionPool:
         key: _PoolKey = (url, vault_id, headers_key)
         self._tool_cache[(key, binding_id)] = (tools, instructions)
 
+    def lookup_cached_tool_parameters(
+        self, qualified_name: str, *, url: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return sanitized ``function.parameters`` for ``qualified_name``, or ``None``.
+
+        Walks the discovery result cache (#1391) — the same OpenAI-shaped tool
+        dicts advertised to the model after ``make_function_tool`` /
+        ``sanitize_mcp_schema``. Newest cache entry wins when the same
+        qualified name appears under more than one binding. ``url`` restricts
+        the scan to that server's transport keys so two agents with similarly
+        named servers don't cross-read schemas.
+        """
+        for (pool_key, _binding_id), (tools, _instructions) in reversed(self._tool_cache.items()):
+            if url is not None and pool_key[0] != url:
+                continue
+            for td in tools:
+                if not isinstance(td, dict):
+                    continue
+                function = td.get("function")
+                if not isinstance(function, dict):
+                    continue
+                if function.get("name") != qualified_name:
+                    continue
+                parameters = function.get("parameters")
+                return parameters if isinstance(parameters, dict) else None
+        return None
+
     def _invalidate_tools_for_pool_key(self, key: _PoolKey) -> None:
         """Drop every binding's cached tool list for one transport key.
 
