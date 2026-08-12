@@ -72,6 +72,84 @@ class TestMcpDispatchSpecHeaders:
         # The resolved URL comes from the spec, not a bare string map value.
         assert call_mock.await_args.args[0] == "https://mcp.github/"
 
+    async def test_second_tool_error_in_user_turn_emits_loop_warning(self) -> None:
+        spec = McpServerSpec(name="kine", url="https://mcp.kine.test/")
+        bound_log = MagicMock()
+
+        @contextlib.asynccontextmanager
+        async def lifecycle(*_args: Any, **_kwargs: Any) -> Any:
+            yield _ToolCall(
+                call_id="call_2",
+                name="mcp__kine__propose_workout",
+                raw_args="{}",
+                bound_log=bound_log,
+            )
+
+        conn = MagicMock()
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=conn)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+
+        with (
+            patch("aios.harness.tool_dispatch._tool_lifecycle", lifecycle),
+            patch(
+                "aios.harness.tool_dispatch._append_tool_result_event", new_callable=AsyncMock
+            ) as append_result,
+            patch("aios.harness.tool_dispatch.runtime.require_crypto_box", return_value=object()),
+            patch(
+                "aios.harness.tool_dispatch._mcp_call_suppressed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "aios.mcp.client.resolve_auth_for_target_url",
+                new_callable=AsyncMock,
+                return_value=(None, {}),
+            ),
+            patch(
+                "aios.mcp.client.call_mcp_tool",
+                new_callable=AsyncMock,
+                return_value={
+                    "error": '{"error":"invalid","code":"missing_required"}',
+                    "code": "tool_error",
+                },
+            ),
+            patch(
+                "aios.db.queries.count_tool_errors_since_last_user",
+                new_callable=AsyncMock,
+                return_value=2,
+            ) as count_errors,
+        ):
+            await _execute_mcp_tool_async(
+                pool,
+                "sess_x",
+                {
+                    "id": "call_2",
+                    "function": {"name": "mcp__kine__propose_workout", "arguments": "{}"},
+                },
+                {"kine": spec},
+                account_id="acc_test_stub",
+            )
+
+        count_errors.assert_awaited_once_with(
+            conn,
+            "sess_x",
+            "mcp__kine__propose_workout",
+            "missing_required",
+            account_id="acc_test_stub",
+        )
+        appended = append_result.await_args.args[3]
+        assert appended["metadata"] == {"mcp_error_code": "missing_required"}
+        rejection_log = bound_log.bind.return_value
+        bound_log.bind.assert_called_once_with(
+            rejection_count=2,
+            error_code="missing_required",
+        )
+        rejection_log.info.assert_called_once_with("mcp_tool.rejected")
+        rejection_log.warning.assert_called_once_with("mcp_tool.rejection_loop")
+
     async def test_unknown_server_bails(self) -> None:
         """A tool naming a server absent from the map raises ``ToolBail`` —
         the spec lookup replaced the old ``url is None`` guard."""
