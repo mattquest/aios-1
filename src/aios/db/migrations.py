@@ -11,10 +11,39 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_MIGRATION_LOCK_KEY = "aios_schema_migrations"
+
+
+@contextmanager
+def migration_lock(db_url: str) -> Iterator[None]:
+    """Serialize production migration runners against one database.
+
+    Fargate replaces the API and worker independently, so both new tasks can
+    reach their migration preflight at once.  Hold a session advisory lock on
+    a dedicated connection across Alembic and Procrastinate schema work.  A
+    crashed task releases the lock with its connection; a waiting peer then
+    re-runs the idempotent upgrade before starting its process.
+    """
+    import psycopg
+
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        conn.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            (_MIGRATION_LOCK_KEY,),
+        )
+        try:
+            yield
+        finally:
+            conn.execute(
+                "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                (_MIGRATION_LOCK_KEY,),
+            )
 
 
 def upgrade_to_head(db_url: str) -> None:
