@@ -1258,6 +1258,38 @@ async def precompute_event_append(
     return _PrecomputedAppend(token_delta=delta, resolved_tool_channel=resolved_tool_channel)
 
 
+async def count_tool_errors_since_last_user(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_name: str,
+    error_code: str,
+    *,
+    account_id: str,
+) -> int:
+    """Count one tool/error pair in the current direct user turn.
+
+    The append-only event log is the durable counter.  Anchoring at the latest
+    direct user message makes a new athlete turn reset the signal without a
+    mutable side table, and account scope remains explicit.
+    """
+    count: int | None = await conn.fetchval(
+        "SELECT count(*) FROM events "
+        "WHERE session_id = $1 AND account_id = $2 "
+        "AND kind = 'message' AND role = 'tool' AND is_error IS TRUE "
+        "AND tool_name = $3 AND data->'metadata'->>'mcp_error_code' = $4 "
+        "AND seq > COALESCE(("
+        "  SELECT max(seq) FROM events "
+        "  WHERE session_id = $1 AND account_id = $2 "
+        "  AND kind = 'message' AND role = 'user'"
+        "), 0)",
+        session_id,
+        account_id,
+        tool_name,
+        error_code,
+    )
+    return count or 0
+
+
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,

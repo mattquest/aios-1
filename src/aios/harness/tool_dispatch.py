@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -56,6 +57,23 @@ if TYPE_CHECKING:
     from aios.services.tasks import ServicerKind
 
 log = get_logger("aios.harness.tool_dispatch")
+
+_MCP_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _mcp_application_error_code(result: dict[str, Any]) -> str:
+    """Extract a bounded server error code without logging error content."""
+    raw_error = result.get("error")
+    if isinstance(raw_error, str):
+        try:
+            payload = json.loads(raw_error)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            code = payload.get("code")
+            if isinstance(code, str) and _MCP_ERROR_CODE_RE.fullmatch(code):
+                return code
+    return "tool_error"
 
 
 def _launch_tasks(
@@ -1146,6 +1164,10 @@ async def _execute_mcp_tool_admitted(
     if mcp_is_error:
         event_data["is_error"] = True
         tc.is_error = True
+        if result.get("code") == "tool_error":
+            event_data["metadata"] = {
+                "mcp_error_code": _mcp_application_error_code(result),
+            }
 
     tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
     await _append_tool_result_event(
@@ -1156,3 +1178,22 @@ async def _execute_mcp_tool_admitted(
         account_id=account_id,
         tool_parent_channel=parent_focal_at_arrival,
     )
+    if mcp_is_error and result.get("code") == "tool_error":
+        from aios.db import queries
+
+        error_code = _mcp_application_error_code(result)
+        async with pool.acquire() as conn:
+            rejection_count = await queries.count_tool_errors_since_last_user(
+                conn,
+                session_id,
+                tc.name,
+                error_code,
+                account_id=account_id,
+            )
+        rejection_log = tc.bound_log.bind(
+            rejection_count=rejection_count,
+            error_code=error_code,
+        )
+        rejection_log.info("mcp_tool.rejected")
+        if rejection_count >= 2:
+            rejection_log.warning("mcp_tool.rejection_loop")
