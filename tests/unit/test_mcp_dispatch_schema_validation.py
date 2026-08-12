@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aios.harness import runtime
 from aios.harness.tool_dispatch import (
-    _ToolCall,
     _execute_mcp_tool_async,
     _mcp_error_log_fields,
+    _ToolCall,
 )
 from aios.mcp.client import _headers_key
 from aios.mcp.pool import McpSessionPool
