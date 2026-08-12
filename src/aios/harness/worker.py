@@ -382,7 +382,8 @@ async def worker_main() -> None:
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()
-        await ensure_sandbox_network()
+        if settings.sandbox_backend != "disabled":
+            await ensure_sandbox_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
         for broker_task in tool_broker.serve_tasks():
