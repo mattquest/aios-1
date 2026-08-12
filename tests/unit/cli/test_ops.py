@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from typer.testing import CliRunner
 
@@ -81,10 +81,14 @@ def test_migrate_configures_logging_before_running_migrations(monkeypatch):
         db_url="postgresql://localhost/test", log_level="INFO"
     )
     parent.apply_procrastinate_schema = AsyncMock()
+    parent.migration_lock = MagicMock()
+    parent.migration_lock.return_value.__enter__.return_value = None
+    parent.migration_lock.return_value.__exit__.return_value = None
 
     with (
         patch("aios.config.get_settings", parent.get_settings),
         patch("aios.logging.configure_logging", parent.configure_logging),
+        patch("aios.db.migrations.migration_lock", parent.migration_lock),
         patch("aios.db.migrations.upgrade_to_head", parent.upgrade_to_head),
         patch("aios.db.migrations.apply_procrastinate_schema", parent.apply_procrastinate_schema),
     ):
@@ -92,6 +96,7 @@ def test_migrate_configures_logging_before_running_migrations(monkeypatch):
 
     assert result.exit_code == 0, result.output
     parent.configure_logging.assert_called_once_with("INFO")
+    parent.migration_lock.assert_called_once_with("postgresql://localhost/test")
     parent.upgrade_to_head.assert_called_once_with("postgresql://localhost/test")
     # configure_logging must run before the migration.
     called = [c[0] for c in parent.mock_calls]
