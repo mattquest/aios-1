@@ -501,7 +501,6 @@ from .events import (  # noqa: E402
     append_event,
     blended_r_eff,
     confirmed_unresolved_predicate,
-    count_tool_errors_since_last_user,
     find_latest_interrupt_seq,
     find_latest_model_workflow_park,
     find_model_workflow_harvest,
@@ -527,6 +526,7 @@ from .events import (  # noqa: E402
     read_windowed_events,
     recompute_session_channels,
     replace_event_data,
+    tool_error_counts_since_last_user,
 )
 from .files import (  # noqa: E402
     insert_file,
@@ -851,7 +851,6 @@ __all__ = [
     "count_request_nudges",
     "count_session_triggers",
     "count_stuck_running_trigger_runs",
-    "count_tool_errors_since_last_user",
     "decrement_open_tool_call_count",
     "default_inbound_policy_if_unset",
     "delete_chat_session",
@@ -1092,6 +1091,7 @@ __all__ = [
     "spill_tool_result_variable",
     "sum_account_session_tokens",
     "summarize_session_tool_calls",
+    "tool_error_counts_since_last_user",
     "try_record_inbound_ack",
     "unscoped_clear_session_snapshot",
     "unscoped_clear_session_snapshot_if_matches",
