@@ -113,3 +113,93 @@ def test_0162_clean_downgrade_removes_receipt_and_fk(postgres: object) -> None:
         )
         == 0
     )
+
+
+@needs_docker
+@pytest.mark.integration
+def test_0162_adopts_exact_legacy_schema(postgres: object) -> None:
+    db_url = _alembic_url(postgres)
+    assert _run_alembic(["upgrade", "0161"], db_url).returncode == 0
+    asyncio.run(
+        _execute(
+            db_url,
+            """
+            ALTER TABLE connector_inbound_acks
+              ADD CONSTRAINT connector_inbound_acks_account_id_fk
+              FOREIGN KEY (account_id) REFERENCES accounts(id)
+              ON DELETE CASCADE;
+            CREATE TABLE account_cascade_purge_receipts (
+                target_account_id text PRIMARY KEY,
+                caller_account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                manifest jsonb,
+                cleanup_attempts integer NOT NULL DEFAULT 0,
+                last_cleanup_error text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                db_purged_at timestamptz NOT NULL DEFAULT now(),
+                cleanup_completed_at timestamptz,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                CHECK (cleanup_attempts >= 0),
+                CHECK (
+                    (cleanup_completed_at IS NULL AND manifest IS NOT NULL)
+                    OR (cleanup_completed_at IS NOT NULL AND manifest IS NULL)
+                ),
+                CHECK (manifest IS NULL OR jsonb_typeof(manifest) = 'object')
+            );
+            """,
+        )
+    )
+
+    up = _run_alembic(["upgrade", "0162"], db_url)
+    assert up.returncode == 0, f"upgrade failed:\n{up.stderr}\n{up.stdout}"
+    assert (
+        asyncio.run(
+            _fetchval(
+                db_url,
+                "SELECT count(*) FROM account_cascade_purge_receipts",
+            )
+        )
+        == 0
+    )
+
+
+@needs_docker
+@pytest.mark.integration
+def test_0162_rejects_mismatched_legacy_fk(postgres: object) -> None:
+    db_url = _alembic_url(postgres)
+    assert _run_alembic(["upgrade", "0161"], db_url).returncode == 0
+    asyncio.run(
+        _execute(
+            db_url,
+            """
+            ALTER TABLE connector_inbound_acks
+              ADD CONSTRAINT connector_inbound_acks_account_id_fk
+              FOREIGN KEY (account_id) REFERENCES accounts(id);
+            """,
+        )
+    )
+
+    up = _run_alembic(["upgrade", "0162"], db_url)
+    assert up.returncode != 0
+    assert "does not match revision 0162" in up.stderr
+
+
+@needs_docker
+@pytest.mark.integration
+def test_0162_rejects_mismatched_legacy_receipt_table(postgres: object) -> None:
+    db_url = _alembic_url(postgres)
+    assert _run_alembic(["upgrade", "0161"], db_url).returncode == 0
+    asyncio.run(
+        _execute(
+            db_url,
+            """
+            CREATE TABLE account_cascade_purge_receipts (
+                target_account_id text PRIMARY KEY,
+                caller_account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+            );
+            """,
+        )
+    )
+
+    up = _run_alembic(["upgrade", "0162"], db_url)
+    assert up.returncode != 0
+    assert "does not match revision 0162" in up.stderr
