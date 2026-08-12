@@ -117,9 +117,9 @@ class TestMcpDispatchSpecHeaders:
                 },
             ),
             patch(
-                "aios.db.queries.count_tool_errors_since_last_user",
+                "aios.db.queries.tool_error_counts_since_last_user",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, 2, 3),
             ) as count_errors,
         ):
             await _execute_mcp_tool_async(
@@ -144,7 +144,9 @@ class TestMcpDispatchSpecHeaders:
         assert appended["metadata"] == {"mcp_error_code": "missing_required"}
         rejection_log = bound_log.bind.return_value
         bound_log.bind.assert_called_once_with(
-            rejection_count=2,
+            pair_rejection_count=2,
+            tool_rejection_count=2,
+            turn_rejection_count=3,
             error_code="missing_required",
         )
         rejection_log.info.assert_called_once_with("mcp_tool.rejected")

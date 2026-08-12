@@ -1183,7 +1183,7 @@ async def _execute_mcp_tool_admitted(
 
         error_code = _mcp_application_error_code(result)
         async with pool.acquire() as conn:
-            rejection_count = await queries.count_tool_errors_since_last_user(
+            pair_count, tool_count, turn_count = await queries.tool_error_counts_since_last_user(
                 conn,
                 session_id,
                 tc.name,
@@ -1191,9 +1191,11 @@ async def _execute_mcp_tool_admitted(
                 account_id=account_id,
             )
         rejection_log = tc.bound_log.bind(
-            rejection_count=rejection_count,
+            pair_rejection_count=pair_count,
+            tool_rejection_count=tool_count,
+            turn_rejection_count=turn_count,
             error_code=error_code,
         )
         rejection_log.info("mcp_tool.rejected")
-        if rejection_count >= 2:
+        if tool_count >= 2:
             rejection_log.warning("mcp_tool.rejection_loop")
