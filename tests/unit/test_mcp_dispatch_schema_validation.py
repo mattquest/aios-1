@@ -284,8 +284,8 @@ class TestMcpDispatchSchemaValidation:
         call.assert_not_awaited()
         quota.assert_not_awaited()
         bail = captured.get("bail", "")
-        assert "at draft.blocks.0.type" in bail
-        assert "required" in bail.lower()
+        assert "at draft.blocks.0" in bail
+        assert "'type' is a required property" in bail
 
     async def test_ref_schema_reports_nested_path(self) -> None:
         """TrainIQ-style ``$ref`` / ``$defs`` still produce path-level errors."""
@@ -297,7 +297,9 @@ class TestMcpDispatchSchemaValidation:
             lifecycle=_as_lifecycle(_capturing_lifecycle(raw, captured)),
         )
         call.assert_not_awaited()
-        assert "at draft.blocks.0.type" in captured.get("bail", "")
+        bail = captured.get("bail", "")
+        assert "at draft.blocks.0" in bail
+        assert "'type' is a required property" in bail
 
     async def test_validator_exception_fails_open(self) -> None:
         """Uncompilable cached schema must not block Coach or escape admission."""
