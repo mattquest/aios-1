@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shutil
 from pathlib import Path
@@ -60,6 +61,18 @@ def _remove_confined_entry(root: Path, name: str) -> None:
             candidate.unlink()
     except OSError as exc:
         raise AccountPurgeArtifactError("failed to remove a confined purge artifact") from exc
+
+
+async def purge_account_host_artifacts_while_locked(
+    _conn: asyncpg.Connection[Any], manifest: AccountCascadePurgeManifest
+) -> None:
+    """Offload host-artifact deletion while the caller holds the cascade lock.
+
+    ``_conn`` is the lock-bearing checkout — this function does not query it.
+    Concurrent purge retries serialize on that session-scoped advisory lock
+    so ``cleanup_attempts`` stays 1 for a successful first pass.
+    """
+    await asyncio.to_thread(purge_account_host_artifacts, manifest)
 
 
 def purge_account_host_artifacts(manifest: AccountCascadePurgeManifest) -> None:
