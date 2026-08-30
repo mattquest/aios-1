@@ -100,5 +100,14 @@ class DisabledBackend:
     async def force_remove(self, sandbox_id: str) -> None:
         return None
 
+    async def prewarm_run(self, image: str) -> str:
+        raise SandboxBackendError(_REFUSAL)
+
+    async def prewarm_commit(self, sandbox_id: str, tag: str, *, labels: dict[str, str]) -> None:
+        raise SandboxBackendError(_REFUSAL)
+
+    async def prewarm_remove(self, sandbox_id: str) -> None:
+        return None
+
     async def is_alive(self, handle: SandboxHandle) -> bool:
         return False

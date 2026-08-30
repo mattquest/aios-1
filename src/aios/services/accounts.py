@@ -345,10 +345,35 @@ async def get_account_subtree_spend_state(
     return spent, limit
 
 
+def _cleanup_incomplete(target_account_id: str, exc: Exception) -> None:
+    """Log and raise the retryable host-cleanup failure."""
+    log.exception(
+        "account.cascade_purge_cleanup_failed",
+        target_account_id=target_account_id,
+        error_kind=type(exc).__name__,
+    )
+    raise AccountPurgeIncompleteError(
+        "database purge completed but external cleanup needs a retry",
+        detail={
+            "account_id": target_account_id,
+            "retryable": True,
+            "retry": f"POST /v1/accounts/{target_account_id}/purge?mode=cascade",
+        },
+    ) from exc
+
+
 async def _resume_account_cascade_cleanup(
     pool: asyncpg.Pool[Any], *, target_account_id: str, caller_account_id: str
 ) -> None:
-    """Run one serialized, replay-safe cleanup attempt from its durable receipt."""
+    """Run one serialized, replay-safe cleanup attempt from its durable receipt.
+
+    Host-artifact deletion runs after the pooled connection is released so
+    the worker does not hold a checkout across filesystem I/O. The
+    session-scoped advisory lock still serializes the DB phase (receipt
+    check / begin / notify). ``purge_account_host_artifacts`` is
+    idempotent, so a concurrent retry racing the host delete is safe.
+    """
+    pending_manifest: AccountCascadePurgeManifest | None = None
     async with pool.acquire() as conn:
         await queries.acquire_account_cascade_cleanup_lock(conn, target_account_id)
         try:
@@ -369,27 +394,27 @@ async def _resume_account_cascade_cleanup(
             await queries.begin_account_cascade_cleanup_attempt(conn, target_account_id)
             try:
                 await account_purge.emit_account_purge_invalidations(conn, manifest)
-                await asyncio.to_thread(account_purge.purge_account_host_artifacts, manifest)
             except Exception as exc:
                 await queries.record_account_cascade_cleanup_error(
                     conn, target_account_id, type(exc).__name__
                 )
-                log.exception(
-                    "account.cascade_purge_cleanup_failed",
-                    target_account_id=target_account_id,
-                    error_kind=type(exc).__name__,
-                )
-                raise AccountPurgeIncompleteError(
-                    "database purge completed but external cleanup needs a retry",
-                    detail={
-                        "account_id": target_account_id,
-                        "retryable": True,
-                        "retry": f"POST /v1/accounts/{target_account_id}/purge?mode=cascade",
-                    },
-                ) from exc
-            await queries.complete_account_cascade_cleanup(conn, target_account_id)
+                _cleanup_incomplete(target_account_id, exc)
+            pending_manifest = manifest
         finally:
             await queries.release_account_cascade_cleanup_lock(conn, target_account_id)
+
+    assert pending_manifest is not None
+    try:
+        await asyncio.to_thread(account_purge.purge_account_host_artifacts, pending_manifest)
+    except Exception as exc:
+        async with pool.acquire() as conn:
+            await queries.record_account_cascade_cleanup_error(
+                conn, target_account_id, type(exc).__name__
+            )
+        _cleanup_incomplete(target_account_id, exc)
+        return
+    async with pool.acquire() as conn:
+        await queries.complete_account_cascade_cleanup(conn, target_account_id)
 
 
 async def _cascade_purge_account(
