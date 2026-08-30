@@ -1100,12 +1100,26 @@ def _validate_mcp_arguments(tc: _ToolCall, arguments: dict[str, Any], *, url: st
     Uses the same sanitized ``parameters`` dict advertised to the model
     (``make_function_tool`` / ``sanitize_mcp_schema``), via
     :func:`validate_arguments` — the builtin path's schema checker.
+
+    A validator/schema-engine exception is treated like a cache miss:
+    warn and proceed. Third-party MCP schemas can be Draft-07 / ``$ref``
+    oddities that ``Draft202012Validator`` cannot compile; failing closed
+    here would block Coach on a hole, and letting the exception escape
+    would surface as ``handler_failed`` instead of a path-level ``ToolBail``.
     """
     schema = _mcp_parameters_schema(tc.name, url=url)
     if schema is None:
         tc.bound_log.warning("mcp_tool.schema_cache_miss", tool=tc.name)
         return
-    schema_error = validate_arguments(arguments, schema)
+    try:
+        schema_error = validate_arguments(arguments, schema)
+    except Exception as err:
+        tc.bound_log.warning(
+            "mcp_tool.schema_validate_failed",
+            tool=tc.name,
+            error_type=type(err).__name__,
+        )
+        return
     if schema_error is not None:
         raise ToolBail(schema_error)
 

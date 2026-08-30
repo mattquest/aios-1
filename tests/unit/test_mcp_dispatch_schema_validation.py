@@ -37,6 +37,52 @@ _SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Coach / TrainIQ shape: nested draft.blocks[].type is what
+# ``invalid_draft_structure`` is about. Validation must name that path.
+_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "athlete_id": {"type": "string"},
+        "draft": {
+            "type": "object",
+            "properties": {
+                "blocks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"type": {"type": "string"}},
+                        "required": ["type"],
+                    },
+                },
+            },
+            "required": ["blocks"],
+        },
+    },
+    "required": ["athlete_id", "draft"],
+}
+
+_REF_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "$defs": {
+        "block": {
+            "type": "object",
+            "properties": {"type": {"type": "string"}},
+            "required": ["type"],
+        }
+    },
+    "properties": {
+        "athlete_id": {"type": "string"},
+        "draft": {
+            "type": "object",
+            "properties": {
+                "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+            },
+            "required": ["blocks"],
+        },
+    },
+    "required": ["athlete_id", "draft"],
+}
+
 
 def _openai_tool(qualified: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -208,6 +254,7 @@ class TestMcpDispatchSchemaValidation:
         tool.name = "propose_workout"
         tool.description = ""
         tool.inputSchema = _SCHEMA
+        tool.outputSchema = None
         envelope = make_function_tool(_QUALIFIED, tool)
         pool = McpSessionPool()
         pool.set_cached_tools(_URL, "v", _headers_key(None), "agt_1:3", [envelope], None)
@@ -221,6 +268,56 @@ class TestMcpDispatchSchemaValidation:
         call.assert_not_awaited()
         assert "athlete_id" in captured.get("bail", "")
         assert "draft" in captured.get("bail", "")
+
+    async def test_nested_draft_path_errors_never_call_mcp(self) -> None:
+        """Missing ``draft.blocks[0].type`` is a path-level ToolBail before MCP."""
+        _install_cached_schema(_DRAFT_SCHEMA)
+        raw = json.dumps({"athlete_id": "ath_1", "draft": {"blocks": [{}]}})
+        captured: dict[str, Any] = {}
+        quota = AsyncMock()
+        call = await _dispatch(
+            raw_args=raw,
+            lifecycle=_as_lifecycle(_capturing_lifecycle(raw, captured)),
+            quota_mock=quota,
+        )
+
+        call.assert_not_awaited()
+        quota.assert_not_awaited()
+        bail = captured.get("bail", "")
+        assert "at draft.blocks.0.type" in bail
+        assert "required" in bail.lower()
+
+    async def test_ref_schema_reports_nested_path(self) -> None:
+        """TrainIQ-style ``$ref`` / ``$defs`` still produce path-level errors."""
+        _install_cached_schema(_REF_DRAFT_SCHEMA)
+        raw = json.dumps({"athlete_id": "ath_1", "draft": {"blocks": [{}]}})
+        captured: dict[str, Any] = {}
+        call = await _dispatch(
+            raw_args=raw,
+            lifecycle=_as_lifecycle(_capturing_lifecycle(raw, captured)),
+        )
+        call.assert_not_awaited()
+        assert "at draft.blocks.0.type" in captured.get("bail", "")
+
+    async def test_validator_exception_fails_open(self) -> None:
+        """Uncompilable cached schema must not block Coach or escape admission."""
+        _install_cached_schema(_SCHEMA)
+        bound_log = MagicMock()
+        raw = json.dumps({"athlete_id": "ath_1", "draft": {}})
+        with patch(
+            "aios.harness.tool_dispatch.validate_arguments",
+            side_effect=RuntimeError("schema engine exploded"),
+        ):
+            call = await _dispatch(
+                raw_args=raw,
+                lifecycle=_as_lifecycle(_lifecycle_for(raw, bound_log)),
+            )
+        call.assert_awaited_once()
+        bound_log.warning.assert_called_once_with(
+            "mcp_tool.schema_validate_failed",
+            tool=_QUALIFIED,
+            error_type="RuntimeError",
+        )
 
 
 class TestMcpErrorLogFields:
