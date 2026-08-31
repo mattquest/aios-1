@@ -95,3 +95,14 @@ def test_host_cleanup_rejects_manifest_traversal(
         purge_account_host_artifacts(_manifest(account_id=unsafe_id))
 
     assert sentinel.read_text() == "safe"
+
+
+def test_host_cleanup_can_run_from_locked_cascade_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host cleanup stays callable from the cascade lock holder path."""
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    owned = tmp_path / "acc_target"
+    _seed(owned)
+    purge_account_host_artifacts(_manifest())
+    assert not owned.exists()

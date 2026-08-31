@@ -140,6 +140,7 @@ class TestMcpDispatchSpecHeaders:
             "missing_required",
             account_id="acc_test_stub",
         )
+        assert append_result.await_args is not None
         appended = append_result.await_args.args[3]
         assert appended["metadata"] == {"mcp_error_code": "missing_required"}
         rejection_log = bound_log.bind.return_value

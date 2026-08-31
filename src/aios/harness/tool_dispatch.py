@@ -45,7 +45,13 @@ from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
-from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
+from aios.tools.invoke import (
+    ToolBail,
+    invoke_builtin,
+    parse_arguments,
+    prepare_builtin,
+    validate_arguments,
+)
 from aios.tools.registry import ToolResult
 from aios.tools.workflow_completion import (
     ERROR_TOOL_NAME,
@@ -59,21 +65,70 @@ if TYPE_CHECKING:
 log = get_logger("aios.harness.tool_dispatch")
 
 _MCP_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_MCP_ERROR_REASON_MAX = 200
+
+
+def _mcp_error_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse a nested JSON object out of ``result["error"]``, if present.
+
+    MCP ``shape_call_result`` stores the server's text block as a string; TrainIQ
+    and similar servers put ``{"code", "reason", ...}`` in that JSON. Returns
+    ``None`` when there is no object payload — callers must not log ``error``
+    itself (it can contain full athlete drafts).
+    """
+    raw_error = result.get("error")
+    if isinstance(raw_error, dict):
+        return raw_error
+    if not isinstance(raw_error, str):
+        return None
+    try:
+        payload = json.loads(raw_error)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _mcp_application_error_code(result: dict[str, Any]) -> str:
     """Extract a bounded server error code without logging error content."""
-    raw_error = result.get("error")
-    if isinstance(raw_error, str):
-        try:
-            payload = json.loads(raw_error)
-        except (json.JSONDecodeError, TypeError):
-            payload = None
-        if isinstance(payload, dict):
-            code = payload.get("code")
-            if isinstance(code, str) and _MCP_ERROR_CODE_RE.fullmatch(code):
-                return code
+    payload = _mcp_error_payload(result)
+    if payload is not None:
+        code = payload.get("code")
+        if isinstance(code, str) and _MCP_ERROR_CODE_RE.fullmatch(code):
+            return code
     return "tool_error"
+
+
+def _mcp_error_log_fields(result: dict[str, Any]) -> dict[str, str]:
+    """Short, log-safe ``code`` / ``reason`` fields from an MCP error envelope.
+
+    Prefers the nested application payload (e.g. TrainIQ
+    ``invalid_draft_structure``) over the transport envelope's ``tool_error``.
+    Truncates ``reason``; never includes the raw error body.
+    """
+    fields: dict[str, str] = {}
+    payload = _mcp_error_payload(result)
+    code: str | None = None
+    reason: str | None = None
+    if payload is not None:
+        nested_code = payload.get("code")
+        if isinstance(nested_code, str) and nested_code:
+            code = nested_code
+        nested_reason = payload.get("reason")
+        if isinstance(nested_reason, str) and nested_reason:
+            reason = nested_reason
+    if code is None:
+        top_code = result.get("code")
+        if isinstance(top_code, str) and top_code:
+            code = top_code
+    if reason is None:
+        top_reason = result.get("reason")
+        if isinstance(top_reason, str) and top_reason:
+            reason = top_reason
+    if code and _MCP_ERROR_CODE_RE.fullmatch(code):
+        fields["error_code"] = code
+    if reason:
+        fields["error_reason"] = reason[:_MCP_ERROR_REASON_MAX]
+    return fields
 
 
 def _launch_tasks(
@@ -1027,6 +1082,48 @@ def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
     return parts[1], parts[2]
 
 
+def _mcp_parameters_schema(qualified_name: str, *, url: str) -> dict[str, Any] | None:
+    """Look up sanitized ``function.parameters`` from the discovery cache.
+
+    Returns ``None`` when the worker pool is absent or the tool is not in
+    cache — callers fail-open rather than blocking the MCP call.
+    """
+    mcp_pool = runtime.mcp_session_pool
+    if mcp_pool is None:
+        return None
+    return mcp_pool.lookup_cached_tool_parameters(qualified_name, url=url)
+
+
+def _validate_mcp_arguments(tc: _ToolCall, arguments: dict[str, Any], *, url: str) -> None:
+    """Raise ``ToolBail`` if cached schema rejects ``arguments``; fail-open on miss.
+
+    Uses the same sanitized ``parameters`` dict advertised to the model
+    (``make_function_tool`` / ``sanitize_mcp_schema``), via
+    :func:`validate_arguments` — the builtin path's schema checker.
+
+    A validator/schema-engine exception is treated like a cache miss:
+    warn and proceed. Third-party MCP schemas can be Draft-07 / ``$ref``
+    oddities that ``Draft202012Validator`` cannot compile; failing closed
+    here would block Coach on a hole, and letting the exception escape
+    would surface as ``handler_failed`` instead of a path-level ``ToolBail``.
+    """
+    schema = _mcp_parameters_schema(tc.name, url=url)
+    if schema is None:
+        tc.bound_log.warning("mcp_tool.schema_cache_miss", tool=tc.name)
+        return
+    try:
+        schema_error = validate_arguments(arguments, schema)
+    except Exception as err:
+        tc.bound_log.warning(
+            "mcp_tool.schema_validate_failed",
+            tool=tc.name,
+            error_type=type(err).__name__,
+        )
+        return
+    if schema_error is not None:
+        raise ToolBail(schema_error)
+
+
 async def _execute_mcp_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -1078,14 +1175,14 @@ async def _execute_mcp_tool_admitted(
 
     Ordering is load-bearing for the outbound quota (#1903): every expected
     pre-publish refusal — malformed arguments, malformed/unknown tool name,
-    missing server, the suppression intercept, auth resolution — happens
-    BEFORE ``reserve_outbound_tool_quota``, so a call that never reaches the
-    connector consumes no dispatch capacity. The reservation is taken at the
-    last moment before ``call_mcp_tool`` (a short DB-only transaction that
-    releases its pooled connection before the external I/O); once it exists
-    it counts even if the connector call or the local result publication
-    fails, because the side effect may have occurred (see the service
-    module's accounting semantics).
+    missing server, schema mismatch, the suppression intercept, auth
+    resolution — happens BEFORE ``reserve_outbound_tool_quota``, so a call
+    that never reaches the connector consumes no dispatch capacity. The
+    reservation is taken at the last moment before ``call_mcp_tool`` (a
+    short DB-only transaction that releases its pooled connection before
+    the external I/O); once it exists it counts even if the connector call
+    or the local result publication fails, because the side effect may have
+    occurred (see the service module's accounting semantics).
     """
     arguments = parse_arguments(tc.raw_args)
     if arguments is None:
@@ -1111,6 +1208,10 @@ async def _execute_mcp_tool_admitted(
     if spec is None:
         raise ToolBail(f"MCP server {server_name!r} not found")
     url = spec.url
+
+    # Same JSON Schema the model saw (sanitized ``function.parameters`` from
+    # the discovery cache). Cache miss fails open so a hole cannot block Coach.
+    _validate_mcp_arguments(tc, arguments, url=url)
 
     # Outbound suppression (#710): MCP is default-deny. When the session is
     # in suppression mode, every MCP call is intercepted (synthesized
@@ -1169,7 +1270,10 @@ async def _execute_mcp_tool_admitted(
                 "mcp_error_code": _mcp_application_error_code(result),
             }
 
-    tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
+    completed_fields: dict[str, Any] = {"is_error": mcp_is_error}
+    if mcp_is_error:
+        completed_fields.update(_mcp_error_log_fields(result))
+    tc.bound_log.info("mcp_tool.completed", **completed_fields)
     await _append_tool_result_event(
         pool,
         session_id,

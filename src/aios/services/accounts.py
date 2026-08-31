@@ -369,7 +369,9 @@ async def _resume_account_cascade_cleanup(
             await queries.begin_account_cascade_cleanup_attempt(conn, target_account_id)
             try:
                 await account_purge.emit_account_purge_invalidations(conn, manifest)
-                await asyncio.to_thread(account_purge.purge_account_host_artifacts, manifest)
+                await asyncio.to_thread(  # pooled-connection-await: allow (eumemic/aios#1903)
+                    account_purge.purge_account_host_artifacts, manifest
+                )
             except Exception as exc:
                 await queries.record_account_cascade_cleanup_error(
                     conn, target_account_id, type(exc).__name__

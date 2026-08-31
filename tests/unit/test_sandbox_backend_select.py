@@ -60,9 +60,7 @@ def test_sandbox_backend_default_is_docker(tmp_path: Path, monkeypatch: pytest.M
     assert settings.sandbox_backend == "docker"
 
 
-def test_select_sandbox_backend_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_select_sandbox_backend_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``sandbox_backend='disabled'`` returns the no-sandbox backend."""
     from aios.sandbox.backends import select_sandbox_backend
     from aios.sandbox.backends.disabled import DisabledBackend
