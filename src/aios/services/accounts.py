@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 from typing import Any
@@ -368,7 +369,9 @@ async def _resume_account_cascade_cleanup(
             await queries.begin_account_cascade_cleanup_attempt(conn, target_account_id)
             try:
                 await account_purge.emit_account_purge_invalidations(conn, manifest)
-                await account_purge.purge_account_host_artifacts_while_locked(conn, manifest)
+                await asyncio.to_thread(
+                    account_purge.purge_account_host_artifacts, manifest
+                )  # pooled-connection-await: allow (eumemic/aios#1903)
             except Exception as exc:
                 await queries.record_account_cascade_cleanup_error(
                     conn, target_account_id, type(exc).__name__

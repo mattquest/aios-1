@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,7 +12,6 @@ from aios.models.accounts import (
 from aios.services.account_purge import (
     AccountPurgeArtifactError,
     purge_account_host_artifacts,
-    purge_account_host_artifacts_while_locked,
 )
 
 
@@ -99,12 +97,12 @@ def test_host_cleanup_rejects_manifest_traversal(
     assert sentinel.read_text() == "safe"
 
 
-async def test_host_cleanup_while_locked_offloads_sync_purge(
+def test_host_cleanup_can_run_from_locked_cascade_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The lock-bearing wrapper must still erase canonical artifacts."""
+    """Host cleanup stays callable from the cascade lock holder path."""
     monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
     owned = tmp_path / "acc_target"
     _seed(owned)
-    await purge_account_host_artifacts_while_locked(MagicMock(), _manifest())
+    purge_account_host_artifacts(_manifest())
     assert not owned.exists()

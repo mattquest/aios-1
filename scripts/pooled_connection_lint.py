@@ -74,7 +74,6 @@ _DB_HELPER_SYMBOLS = frozenset(
         "_session_owned",
         "_walk",
         "account_purge.emit_account_purge_invalidations",
-        "account_purge.purge_account_host_artifacts_while_locked",
         "accounts_service.resolve_effective_timezone_on",
         "agents_service.load_for_session",
         "agents_service.validate_pinned_agent_version",

@@ -404,9 +404,8 @@ class TestCircuitBreaker:
         )
         assert pool.lookup_cached_tool_parameters("mcp__kine__missing") is None
 
-    def test_lookup_cached_tool_parameters_newest_binding_wins(self) -> None:
-        old_schema = {"type": "object", "properties": {"a": {"type": "string"}}}
-        new_schema = {"type": "object", "properties": {"b": {"type": "number"}}}
+    def test_lookup_cached_tool_parameters_same_schema_across_bindings(self) -> None:
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
         pool = McpSessionPool()
         pool.set_cached_tools(
             URL,
@@ -418,7 +417,7 @@ class TestCircuitBreaker:
                     "type": "function",
                     "function": {
                         "name": "mcp__kine__propose_workout",
-                        "parameters": old_schema,
+                        "parameters": schema,
                     },
                 }
             ],
@@ -434,10 +433,48 @@ class TestCircuitBreaker:
                     "type": "function",
                     "function": {
                         "name": "mcp__kine__propose_workout",
+                        "parameters": schema,
+                    },
+                }
+            ],
+            None,
+        )
+        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout", url=URL) == schema
+
+    def test_lookup_cached_tool_parameters_ambiguous_same_url_fails_open(self) -> None:
+        old_schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        new_schema = {"type": "object", "properties": {"b": {"type": "number"}}}
+        pool = McpSessionPool()
+        pool.set_cached_tools(
+            URL,
+            "vault_a",
+            EMPTY_KEY,
+            "agt_1:3",
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__kine__propose_workout",
+                        "parameters": old_schema,
+                    },
+                }
+            ],
+            None,
+        )
+        pool.set_cached_tools(
+            URL,
+            "vault_b",
+            EMPTY_KEY,
+            "agt_1:4",
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__kine__propose_workout",
                         "parameters": new_schema,
                     },
                 }
             ],
             None,
         )
-        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout") == new_schema
+        assert pool.lookup_cached_tool_parameters("mcp__kine__propose_workout", url=URL) is None

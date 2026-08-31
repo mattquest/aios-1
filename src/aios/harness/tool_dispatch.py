@@ -124,8 +124,8 @@ def _mcp_error_log_fields(result: dict[str, Any]) -> dict[str, str]:
         top_reason = result.get("reason")
         if isinstance(top_reason, str) and top_reason:
             reason = top_reason
-    if code:
-        fields["error_code"] = code[:64]
+    if code and _MCP_ERROR_CODE_RE.fullmatch(code):
+        fields["error_code"] = code
     if reason:
         fields["error_reason"] = reason[:_MCP_ERROR_REASON_MAX]
     return fields

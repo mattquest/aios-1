@@ -241,6 +241,35 @@ class TestMcpDispatchSchemaValidation:
         call.assert_awaited_once()
         bound_log.warning.assert_called_once_with("mcp_tool.schema_cache_miss", tool=_QUALIFIED)
 
+    async def test_ambiguous_cached_schema_same_url_fails_open(self) -> None:
+        """Different schemas under one MCP URL are treated as a cache miss."""
+        pool = McpSessionPool()
+        pool.set_cached_tools(
+            _URL,
+            "vault_a",
+            _headers_key(None),
+            "agt_1:3",
+            [_openai_tool(_QUALIFIED, {"type": "object", "properties": {"a": {"type": "string"}}})],
+            None,
+        )
+        pool.set_cached_tools(
+            _URL,
+            "vault_b",
+            _headers_key(None),
+            "agt_1:3",
+            [_openai_tool(_QUALIFIED, {"type": "object", "properties": {"b": {"type": "number"}}})],
+            None,
+        )
+        runtime.mcp_session_pool = pool
+        bound_log = MagicMock()
+        raw = '{"athlete_id": 123}'
+        call = await _dispatch(
+            raw_args=raw,
+            lifecycle=_as_lifecycle(_lifecycle_for(raw, bound_log)),
+        )
+        call.assert_awaited_once()
+        bound_log.warning.assert_called_once_with("mcp_tool.schema_cache_miss", tool=_QUALIFIED)
+
     async def test_no_pool_fails_open(self) -> None:
         runtime.mcp_session_pool = None
         raw = '{"athlete_id": 123}'
@@ -352,6 +381,10 @@ class TestMcpErrorLogFields:
     def test_falls_back_to_envelope_code(self) -> None:
         fields = _mcp_error_log_fields({"error": "boom", "code": "tool_error"})
         assert fields == {"error_code": "tool_error"}
+
+    def test_invalid_error_code_is_not_logged(self) -> None:
+        fields = _mcp_error_log_fields({"error": "boom", "code": "Bad-Code!"})
+        assert fields == {}
 
     async def test_completed_log_includes_extracted_fields(self) -> None:
         prior = runtime.mcp_session_pool
