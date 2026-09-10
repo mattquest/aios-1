@@ -37,7 +37,7 @@
 # is a fresh `docker exec`, so shell state does not persist across calls
 # (one-shot exec model, see aios_v1_decisions.md).
 
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
 
 # Install standard tools. Keep this list small; aios is opinionated about
 # what lives in the sandbox.
